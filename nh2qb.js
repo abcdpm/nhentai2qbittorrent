@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nHentai → qBittorrent
 // @namespace    http://tampermonkey.net/
-// @version      2.1
+// @version      2.2
 // @updateURL    https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
 // @downloadURL  https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
 // @description  在 nHentai 页面添加按钮，支持批量推送到 qBittorrent、美观通知栏、设置弹窗、自动记忆复选框状态、封面右下角快捷复制链接
@@ -273,6 +273,7 @@
         btn.className = 'btn btn-primary';
         // 【新增 4/4】单页状态判断
         // 如果是详情页，也判断是否下载过，下载过则更改按钮文本
+        const gid = location.pathname.split('/')[2];
         if (downloadedSet.has(gid)) {
             btn.innerText = '已下载 (再次推送)';
             btn.style.backgroundColor = '#4caf50'; // 绿色
@@ -280,12 +281,14 @@
         } else {
             btn.innerText = '推送到 qBittorrent';
         }
+        // 插入按钮到 "Download" 按钮所在的容器中
         downloadAnchor.parentNode.appendChild(btn);
 
         btn.addEventListener('click', async () => {
+            // 获取gid
             const gid = location.pathname.split('/')[2];
+            // 获取标题
             const title = document.querySelector('#info h1')?.innerText?.trim() || gid;
-
             let loginToast;
             try {
                 loginToast = notify(`<div class='title'>正在登录 qBittorrent…</div>`);
@@ -296,7 +299,6 @@
                 notify(`<div class='title'>登录失败</div>无法登录 qBittorrent，请检查设置。`, 6000);
                 return;
             }
-
             const startToast = notify(`<div class='title'>开始推送</div>正在下载并推送：${gid} - ${escapeHtml(title)}`);
             const res = await pushTorrentPromise(gid, title);
             startToast.close();
