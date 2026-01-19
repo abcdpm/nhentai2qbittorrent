@@ -28,6 +28,7 @@
      * 1. 样式定义 (CSS Styles)
      * 包含：通知容器、日志卡片、固定按钮、以及封面上的复制按钮样式
      **************************************************************************/
+
     GM_addStyle(`
         /* 右上角通知浮层容器 */
         #nh-qb-container {
@@ -95,10 +96,12 @@
      * 2. 全局状态与配置管理 (Configuration)
      * 从 localStorage 加载 qBittorrent 设置及用户勾选记忆
      **************************************************************************/
+
     // qBittorrent 连接配置
     let QB_URL  = localStorage.getItem('qb_url')  || 'http://192.168.1.1:8848';
     let QB_USER = localStorage.getItem('qb_user') || 'admin';
     let QB_PASS = localStorage.getItem('qb_pass') || 'adminadmin';
+
     // 下载根目录配置
     let QB_PATH = localStorage.getItem('qb_path') || '/downloads';
 
@@ -111,10 +114,9 @@
         savedChecked = {};
     }
 
-    // 【v2.0 新增 1/4】初始化已下载历史记录 (使用 Set 提高查询性能)
-    // 读取速度极快（毫秒级）。Set.has(id) 的查询时间复杂度是 O(1)。无论里面存了 10 条还是 10 万条，判断“是否已下载”的速度都是瞬间完成的。
-    // 存储空间占用极小。一个 GID 通常是 6 位数字（例如 374094），加上分隔符，平均每个占用约 7-8 字节。
-    // localStorage 的单域名上限通常是 5 MB（约 5000 KB）。你可以连续下载 50 年 甚至更久，才会碰到存储上限。
+    // 初始化已下载历史记录 (使用 Set 提高查询性能)
+    // 注意：Set.has(id) 的查询时间复杂度是 O(1)，可高效处理大量历史数据(如10万条)，
+    // 相比 Array 遍历查询，在处理大规模数据时能显著减少页面卡顿。
     const DOWNLOADED_KEY = 'nh_qb_downloaded_gids';
     let downloadedSet = new Set();
     try {
@@ -127,8 +129,12 @@
     /**************************************************************************
      * 3. 基础工具函数 (Utilities)
      **************************************************************************/
-
-    // 显示自定义通知弹窗
+    
+    /**
+     * 显示自定义通知弹窗
+     * @param {string} html - 通知的HTML内容
+     * @param {number} duration - 显示时长(ms)
+     */
     function notify(html, duration = 5000) {
         let container = document.getElementById('nh-qb-container');
         if (!container) {
@@ -163,7 +169,9 @@
         return { close };
     }
 
-    // 复制文本到剪贴板（兼容方案）
+    /**
+     * 复制文本到剪贴板（兼容方案）
+     */
     function copyToClipboard(text) {
         if (navigator.clipboard && navigator.clipboard.writeText) {
             navigator.clipboard.writeText(text).then(() => {
@@ -180,19 +188,28 @@
         }
     }
 
-    // HTML 转义防止 XSS
+    /**
+     * HTML 转义防止 XSS
+     */
     function escapeHtml(s) {
         return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"})[c]);
     }
 
-    // 清理文件名非法字符
+    /**
+     * 清理文件名非法字符
+     * 1. 替换 Windows/Linux 文件系统非法字符
+     * 2. 压缩多余空格
+     * 3. 截取长度防止溢出
+     * 4. 去除末尾的特殊符号(. + - 空格)
+     */
     function sanitizeFileName(name) {
         // 1. 替换系统非法字符为 " "
         // 2. 合并多余空格
-        // 3. 截取长度 (防止文件名过长)
+        // 3. 去除上一步产生的首尾空格
+        // 4. 截取长度 (防止文件名过长)
+        // 5. 去除上一步产生的首尾空格
         let clean = name.replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim().substring(0, 150).trim();
-        // 【新增修改】正则去除末尾的特殊字符 (. + - 空格)
-        // 持续替换直到末尾没有这些字符为止
+        // 6. 正则去除末尾的特殊字符，持续替换直到末尾没有这些字符为止
         return clean.replace(/[.+\-\s]+$/g, '');
     }
 
@@ -200,7 +217,9 @@
      * 4. qBittorrent 交互逻辑 (API Interaction)
      **************************************************************************/
 
-    // qBittorrent 身份验证登录
+    /**
+     * qBittorrent 身份验证登录
+     */
     function loginQB() {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
@@ -217,7 +236,10 @@
         });
     }
 
-    // 推送单个种子到 qBittorrent (下载种子并上传)
+    /**
+     * 推送单个种子到 qBittorrent
+     * 流程：下载 .torrent 文件 -> 构建 FormData -> 调用 qB API 添加种子
+     */
     function pushTorrentPromise(gid, title) {
         return new Promise((resolve) => {
             const torrentUrl = `https://nhentai.net/g/${gid}/download`;
@@ -265,13 +287,14 @@
      * 5. 详情页功能 (Single Page Logic)
      * 在本子详情页添加单点推送按钮
      **************************************************************************/
+    
     function addSinglePageButton() {
         const downloadAnchor = document.querySelector("a[href*='/download']");
         if (!downloadAnchor) return;
 
         const btn = document.createElement('button');
         btn.className = 'btn btn-primary';
-        // 【新增 4/4】单页状态判断
+        // 单页状态判断
         // 如果是详情页，也判断是否下载过，下载过则更改按钮文本
         const gid = location.pathname.split('/')[2];
         if (downloadedSet.has(gid)) {
@@ -322,34 +345,38 @@
      * 6. 列表页功能 (Batch Mode Logic)
      * 处理列表页的复选框、记忆、批量推送及复制按钮、记录历史推送最大gid值及对应时间戳、视觉标记与批量去重
      **************************************************************************/
+
     function addBatchFeature() {
         const thumbs = document.querySelectorAll('.gallery');
         if (!thumbs.length) return;
 
-        // 记录历史推送最大gid值及对应时间戳
-        // 初始化：初始化：强制显示双行，优化 Flex 布局防止覆盖
+        // --- 历史记录模块：记录推送过的最大 GID ---
         const HISTORY_KEY = 'nh_qb_push_history_v2';
         const OLD_KEY = 'nh_qb_pushed_max_gid';
         const getBjTime = () => new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+
+        // 读取历史记录，若不存在则初始化
         let pushHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || '{"max":{"id":0,"time":"--"},"prev":{"id":0,"time":"--"}}');
-        // 数据迁移逻辑
+
+        // 数据迁移逻辑：兼容旧版本纯数字存储
         const oldSimpleVal = parseInt(localStorage.getItem(OLD_KEY) || '0');
         if (oldSimpleVal > pushHistory.max.id) {
             pushHistory.max.id = oldSimpleVal;
             pushHistory.max.time = '旧记录';
         }
-        // 渲染函数：取消 if 判断，强制渲染两行
+
+        // 渲染右下角 GID 信息面板 (HTML生成)
         const renderGidInfo = (data) => {
             const linkStyle = 'color:#ed2553;font-weight:bold;font-size:14px;margin:0 4px;text-decoration:none;border-bottom:1px dashed #ed2553;';
             const timeStyle = 'color:#888;font-size:11px;font-family:monospace;min-width:110px;text-align:right;display:inline-block;';
             const rowStyle = 'display:flex;align-items:center;justify-content:flex-end;width:100%;margin-bottom:2px;';
-            // 第一行：最大 GID
+            // 第一行：当前最大 GID
             let html = `<div style="${rowStyle}">
                             <span>已推送最大 GID:</span>
                             <a href="/g/${data.max.id}/" target="_blank" style="${linkStyle}">${data.max.id}</a>
                             <span style="${timeStyle}">[${data.max.time}]</span>
                         </div>`;
-            // 第二行：上次 GID (始终显示)
+            // 第二行：上次最大 GID
             html += `<div style="${rowStyle}">
                             <span style="color:#aaa;">上次推送最大 GID:</span>
                             <a href="/g/${data.prev.id}/" target="_blank" style="${linkStyle}">${data.prev.id}</a>
@@ -357,18 +384,22 @@
                         </div>`;
             return html;
         };
+
+        // 创建并挂载 GID 显示容器
         const maxIdInfo = document.createElement('div');
         maxIdInfo.id = 'nh-max-gid-display';
-        // 关键修改：display:flex + flex-direction:column 确保垂直排列，不被覆盖
+        // 使用 Flex column 布局确保垂直排列不重叠
         maxIdInfo.style.cssText = 'position:fixed;bottom:80px;right:10px;z-index:99990;background:rgba(0,0,0,0.9);padding:8px 12px;border-radius:4px;color:#ccc;font-size:12px;pointer-events:auto;text-align:right;box-shadow:0 2px 8px rgba(0,0,0,0.5);display:flex;flex-direction:column;align-items:flex-end;';
         maxIdInfo.innerHTML = renderGidInfo(pushHistory);
         document.body.appendChild(maxIdInfo);
 
+        // --- 循环处理每个本子封面 ---
         thumbs.forEach(thumb => {
-            // 解析 GID
+            // 解析链接获取 GID
             const a = thumb.querySelector('a');
             if (!a) return;
             const href = a.href || '';
+            // 兼容两种URL格式：/g/123/ 或 /g/123
             const m = href.match(/\/g\/(\d+)\//) || href.match(/\/g\/(\d+)$/);
             const gid = m ? m[1] : (href.split('/g/')[1] ? href.split('/g/')[1].split('/')[0] : null);
             if (!gid) return;
@@ -376,16 +407,16 @@
             const title = (thumb.querySelector('.caption')?.innerText || gid).trim();
             thumb.style.position = 'relative';
 
-            // 判断中文本子则高亮处理
+            // --- 中文高亮逻辑 ---
             // 判断是否包含中文标签 (29963) 或标题含有 [Chinese]
             // tag 29963 = Chinese, tag 17249 = Translated
             const dataTags = thumb.getAttribute('data-tags') || '';
             const isChinese = dataTags.includes('29963') || title.includes('[Chinese]') || title.includes('汉化');
             if (isChinese) {
-                // 红色加粗边框
+                // 仅对标题栏(.caption)应用高亮样式
                 const caption = thumb.querySelector('.caption');
                 if (caption) {
-                    // 1. 布局定位：位于图片下方(top:100%)
+                    // 1. 布局定位：位于图片下方(top:100%)，避免遮挡图片
                     caption.style.position = 'absolute';
                     caption.style.top = '100%';
                     caption.style.bottom = 'auto';
@@ -393,7 +424,7 @@
                     caption.style.width = '100%';
                     caption.style.zIndex = '20';
 
-                    // 2. 视觉样式：改为带透明度的红色边框 + 原站灰色背景
+                    // 2. 视觉样式：带透明度的红框 + 原站深灰背景
                     // rgba(255, 0, 0, 0.5) 表示红色，透明度 50%
                     caption.style.border = '3px solid rgba(255, 0, 0, 0.5)';
                     caption.style.boxShadow = '0 0 6px rgba(255, 0, 0, 0.8)';
@@ -402,36 +433,34 @@
                     caption.style.color = '#d9d9d9'; // 原站文字颜色
                     caption.style.lineHeight = '15px';
 
-                    // 3. 初始折叠状态
+                    // 3. 初始状态：折叠
                     caption.style.height = 'auto';
                     caption.style.maxHeight = '42px';
                     caption.style.overflow = 'hidden';
                     caption.style.whiteSpace = 'normal';
                     caption.style.transition = 'max-height 0.3s ease';
 
-                    // 4. 交互逻辑：鼠标悬停展开
+                    // 4. 交互：鼠标悬停时展开显示完整标题
                     thumb.addEventListener('mouseenter', () => {
                         caption.style.maxHeight = '300px';
                     });
-
                     thumb.addEventListener('mouseleave', () => {
                         caption.style.maxHeight = '42px';
                     });
                 }
             }
 
-            // 1. 批量选择复选框 (右上角)
+            // --- 批量复选框逻辑 ---
             const cb = document.createElement('input');
             cb.type = 'checkbox';
             cb.dataset.gid = gid;
             cb.dataset.title = title;
             cb.style.cssText = 'position:absolute;top:6px;right:6px;z-index:20;width:27px;height:27px;transform:scale(1.05);';
+            
             // 如果是中文本子，修改复选框颜色 (红色)
             if (isChinese) {
                 cb.style.accentColor = '#ff0000'; // 选中状态：内部打勾背景变红
-                // 视觉增强：
-                // 1. box-shadow: 范围扩大到 6px，且使用纯红 (alpha=1)
-                // 2. outline: 增加 2px 实线红边，让未选中时的方框也变成醒目的红色
+                // 使用 box-shadow 和 outline 增强视觉效果，并消除间隙
                 cb.style.boxShadow = '0 0 12px rgba(255, 0, 0, 1)';
                 cb.style.outline = '2px solid #ff0000';
                 // 设置轮廓偏移量为负数，消除红框与黑框之间的空隙
@@ -439,28 +468,31 @@
                 // 修正偏移：因为加了 outline，可能需要微调 margin 避免视觉偏差
                 cb.style.margin = '1px';
             }
-            // 恢复勾选状态
+
+            // 恢复之前的勾选状态
             if (savedChecked[gid]) cb.checked = true;
+
+            // 监听勾选变化并保存
             cb.addEventListener('change', () => {
                 if (cb.checked) savedChecked[gid] = title;
                 else delete savedChecked[gid];
                 localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
             });
 
-            // 【v2.0 新增 2/4 part A】如果已下载，添加视觉标记 (绿色标签)
-            // 在循环中判断本子是否已下载，如果是，在封面添加绿色“已下载”标记。
+            // --- 已下载标记逻辑 ---
+            // 检查本地 Set，若已存在则显示绿色标签
             if (downloadedSet.has(gid)) {
                 const tag = document.createElement('div');
                 tag.style.cssText = 'position:absolute;top:0;left:0;background:#4caf50;color:#fff;font-size:12px;padding:2px 6px;z-index:25;border-bottom-right-radius:4px;font-weight:bold;box-shadow:2px 2px 4px rgba(0,0,0,0.5);';
                 tag.innerText = '已下载';
                 thumb.appendChild(tag);
-                // 可选：让已下载的封面稍微变暗，方便区分
+                // 变暗已下载的封面以示区分
                 const cover = thumb.querySelector('.cover');
                 if(cover) cover.style.filter = 'brightness(0.6)';
             }
             thumb.appendChild(cb);
 
-            // 2. 单本复制链接按钮 (右下角)
+            // --- 快捷复制按钮 ---
             const copyBtn = document.createElement('button');
             const fullLink = a.href;
             copyBtn.className = 'nh-copy-link-btn';
@@ -474,39 +506,37 @@
             thumb.appendChild(copyBtn);
         });
 
-        // 批量推送操作按钮
+        // 页面底部的批量推送按钮
         const batchBtn = document.createElement('button');
         batchBtn.className = 'btn btn-primary';
         batchBtn.innerText = '批量推送到 qBittorrent';
         batchBtn.style.cssText = 'position:fixed;bottom:20px;right:80px;z-index:99999;';
         document.body.appendChild(batchBtn);
 
-        // 设置入口按钮
+        // 页面右下角的设置按钮
         const setBtn = document.createElement('div');
         setBtn.className = 'nh-qb-fixed-btn';
         setBtn.innerHTML = `<button id='nhqb_settings' class='btn btn-primary'>设置</button>`;
         document.body.appendChild(setBtn);
         document.getElementById('nhqb_settings').addEventListener('click', showSettingsModal);
 
-        // 批量推送执行逻辑
-        // 【新增 2/4 part B】修改批量推送逻辑：去重过滤 + 更新本地记录
-        // 修改批量按钮点击事件，自动过滤掉已下载的任务。
+        // --- 批量推送核心执行逻辑 ---
         batchBtn.addEventListener('click', async () => {
             const allChecked = Array.from(document.querySelectorAll("input[type=checkbox][data-gid]:checked"));
             if (!allChecked.length) { notify(`<div class='title'>提示</div>请先勾选要推送的本子！`); return; }
 
-            // 核心去重逻辑
+            // 1. 去重过滤：自动剔除已在 downloadedSet 中的任务
             const checked = allChecked.filter(cb => {
                 const isDownloaded = downloadedSet.has(cb.dataset.gid);
                 if (isDownloaded) {
-                    // 取消勾选视觉状态
+                    // 取消视觉勾选并从内存记录中删除
                     cb.checked = false;
                     delete savedChecked[cb.dataset.gid];
                 }
                 return !isDownloaded;
             });
             
-            // 如果过滤后数量变少，提示用户
+            // 2. 提示跳过情况
             const skippedCount = allChecked.length - checked.length;
             if (skippedCount > 0) {
                 notify(`<div class='title'>自动去重</div>已自动跳过 ${skippedCount} 个已下载的任务`, 4000);
@@ -514,7 +544,7 @@
 
             if (checked.length === 0) return; // 如果全部都是重复的，直接结束
 
-            // 登录检查
+            // 3. 登录检查
             let loginToast;
             try {
                 loginToast = notify(`<div class='title'>正在登录 qBittorrent…</div>`);
@@ -529,6 +559,7 @@
             const total = checked.length;
             const progressNotify = notify(`<div class='title'>开始推送</div>已推送：0/${total}` , 20000);
 
+            // 4. 并行执行推送任务
             const results = await Promise.all(checked.map(cb => {
                 const gid = cb.dataset.gid;
                 const title = cb.dataset.title;
@@ -536,17 +567,18 @@
                 delete savedChecked[gid]; // 内存中删除记录
                 return pushTorrentPromise(gid, title);
             }));
-            // 将变更后的 savedChecked 保存回 localStorage
+
+            // 5. 同步复选框状态到 localStorage
             localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
 
-            // 记录 成功推送到qB的最大 GID 数值
-            // 将成功推送的任务加入本地已下载历史
-            // 更新逻辑：记录上次值、更新最大值、记录时间、刷新UI
+            // 6. 处理成功结果：更新本地记录与最大 GID
             const successItems = results.filter(r => r.ok);
             if (successItems.length > 0) {
+                // 将成功项加入已下载 Set
                 successItems.forEach(item => downloadedSet.add(item.gid));
                 localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
-                // 刷新页面上的“已下载”标记 (无需刷新网页)
+                
+                // 实时刷新页面上的“已下载”绿色标记
                 successItems.forEach(item => {
                     const cb = document.querySelector(`input[data-gid="${item.gid}"]`);
                     if (cb) {
@@ -563,27 +595,29 @@
                     }
                 });
 
-                // 提取本次成功推送的所有 GID
+                // 计算并更新最大 GID 记录
                 const currentBatchGids = successItems.map(r => parseInt(r.gid));
                 const currentBatchMax = Math.max(...currentBatchGids);
-                // 读取旧记录进行比对
+                
+                // 仅当新 GID 大于历史记录时更新
                 if (currentBatchMax > pushHistory.max.id) {
-                    // 1. 将当前的"最大"归档为"上次"
+                    // 归档旧记录为"上次
                     pushHistory.prev.id = pushHistory.max.id;
                     pushHistory.prev.time = pushHistory.max.time;
-                    // 2. 更新新的"最大" 和 "当前北京时间"
+                    // 更新新纪录为"最大"
                     pushHistory.max.id = currentBatchMax;
-                    pushHistory.max.time = getBjTime(); // 使用上面定义的辅助函数
-                    // 3. 存储
+                    pushHistory.max.time = getBjTime();
+                    // 持久化存储
                     localStorage.setItem(HISTORY_KEY, JSON.stringify(pushHistory));
                     // 同步更新旧key以防其他逻辑依赖
                     localStorage.setItem(OLD_KEY, currentBatchMax);
-                    // 4. 实时刷新右下角显示
+                    // 实时刷新右下角 UI
                     const infoEl = document.getElementById('nh-max-gid-display');
                     if(infoEl) infoEl.innerHTML = renderGidInfo(pushHistory);
                 }
             }
 
+            // 7. 显示最终结果通知
             const successCount = results.filter(r => r.ok).length;
             const failed = results.filter(r => !r.ok);
 
@@ -616,7 +650,7 @@
             <div style='margin-bottom:12px;padding-top:12px;border-top:1px solid #eee;'>
                 <label>历史记录管理：</label>
                 <button id='nhq_sync' class='btn btn-secondary' style='margin-top:4px;width:100%'>🔄 从 qBittorrent 同步已下载记录</button>
-                <div style='font-size:12px;color:#888;margin-top:4px'>* 若 qB 任务较多(如7000+)，点击后请耐心等待几秒</div>
+                <div style='font-size:12px;color:#888;margin-top:4px'>* 若 qB 任务较多(如10000+)，点击后请耐心等待几秒</div>
             </div>
             <div style='text-align:right'><button id='nhq_save' class='btn btn-primary'>保存</button> <button id='nhq_test' class='btn btn-secondary'>测试连接</button> <button id='nhq_cancel' class='btn btn-secondary'>取消</button></div>
         `;
@@ -624,16 +658,14 @@
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
 
-        // 【新增 3/4】同步历史记录逻辑
+        // 同步历史记录：从 qBittorrent 获取所有种子并更新本地 Set
         modal.querySelector('#nhq_sync').addEventListener('click', async () => {
             const btn = modal.querySelector('#nhq_sync');
             const originalText = btn.innerText;
             btn.innerText = '正在获取数据 (可能需要几秒)...';
             btn.disabled = true;
-
             try {
                 await loginQB(); // 先确保登录
-                
                 GM_xmlhttpRequest({
                     method: 'GET',
                     url: QB_URL.replace(/\/$/, '') + '/api/v2/torrents/info',
@@ -643,11 +675,10 @@
                             let newCount = 0;
                             torrents.forEach(t => {
                                 // 解析逻辑：脚本保存路径通常为 .../Title/GID
-                                // 所以我们取 save_path 的最后一部分作为 GID
+                                // 取 save_path 的最后一部分作为 GID
                                 // 兼容 Windows(\) 和 Linux(/) 路径分隔符
                                 const parts = t.save_path.split(/[/\\]/);
                                 const folderName = parts[parts.length - 1]; 
-                                
                                 // 简单校验：GID 应该是纯数字
                                 if (/^\d+$/.test(folderName)) {
                                     if (!downloadedSet.has(folderName)) {
@@ -656,10 +687,8 @@
                                     }
                                 }
                             });
-                            
                             localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
                             notify(`<div class='title'>同步成功</div>新增记录：${newCount} 条<br>当前总记录：${downloadedSet.size} 条`);
-                            
                             // 刷新页面以显示状态
                             setTimeout(() => location.reload(), 1500);
                         } catch (e) {
@@ -686,7 +715,7 @@
 
         modal.querySelector('#nhq_cancel').addEventListener('click', () => overlay.remove());
 
-        // 保存配置
+        // 保存配置到 localStorage
         modal.querySelector('#nhq_save').addEventListener('click', () => {
             QB_URL = modal.querySelector('#nhq_addr').value.trim();
             QB_PATH = modal.querySelector('#nhq_path').value.trim();
@@ -729,8 +758,8 @@
             searchInput.setAttribute('autocomplete', 'off');
         }
 
-        // 需求: 在 Random 左侧新增 Chinese 按钮
-        // 使用 querySelectorAll 同时选中顶部导航栏和移动端下拉菜单中的 Random 链接
+        // 在 Random 左侧新增 Chinese 按钮
+        // 同时支持 PC 端顶部导航栏和移动端下拉菜单
         const randomLinks = document.querySelectorAll('a[href="/random/"]');
 
         randomLinks.forEach(link => {
@@ -764,7 +793,7 @@
         addBatchFeature(); // 列表页
     }
 
-    // 在所有页面注入全局浮动设置按钮（作为兜底）
+    // 在所有页面注入全局浮动设置按钮（作为兜底设置入口）
     if (!document.getElementById('nhqb_settings')) {
         const fix = document.createElement('div');
         fix.className = 'nh-qb-fixed-btn';
