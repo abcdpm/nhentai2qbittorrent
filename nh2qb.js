@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nHentai → qBittorrent
 // @namespace    http://tampermonkey.net/
-// @version      2.3
+// @version      2.4
 // @updateURL    https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
 // @downloadURL  https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
 // @description  在 nHentai 页面添加按钮，支持批量推送到 qBittorrent、美观通知栏、设置弹窗、自动记忆复选框状态、封面右下角快捷复制链接
@@ -650,13 +650,74 @@
             <div style='margin-bottom:12px;padding-top:12px;border-top:1px solid #eee;'>
                 <label>历史记录管理：</label>
                 <button id='nhq_sync' class='btn btn-secondary' style='margin-top:4px;width:100%'>🔄 从 qBittorrent 同步已下载记录</button>
-                <div style='font-size:12px;color:#888;margin-top:4px'>* 若 qB 任务较多(如10000+)，点击后请耐心等待几秒</div>
+                <div style="display:flex; gap:10px; margin-top:8px;">
+                    <button id='nhq_backup' class='btn btn-secondary' style='flex:1'>⬇️ 备份记录到本地</button>
+                    <button id='nhq_restore_btn' class='btn btn-secondary' style='flex:1'>⬆️ 从文件恢复记录</button>
+                    <input type="file" id="nhq_restore_input" accept=".json" style="display:none">
+                </div>
+                <div style='font-size:12px;color:#888;margin-top:4px'>* 若 qB 任务较多(如10000+)，同步时请耐心等待几秒</div>
             </div>
             <div style='text-align:right'><button id='nhq_save' class='btn btn-primary'>保存</button> <button id='nhq_test' class='btn btn-secondary'>测试连接</button> <button id='nhq_cancel' class='btn btn-secondary'>取消</button></div>
         `;
 
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
+
+        // 备份记录到本地 JSON 文件
+        modal.querySelector('#nhq_backup').addEventListener('click', () => {
+            const data = localStorage.getItem(DOWNLOADED_KEY) || '[]';
+            const blob = new Blob([data], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            
+            // 生成带日期的文件名，例如：nh_history_20231025.json
+            const dateStr = new Date().toISOString().slice(0,10).replace(/-/g, "");
+            a.download = `nh_downloaded_history_${dateStr}.json`;
+            a.href = url;
+            a.click();
+            URL.revokeObjectURL(url);
+            notify(`<div class='title'>备份已下载</div>已保存到本地磁盘`);
+        });
+
+        // 恢复按钮点击 -> 触发文件选择
+        modal.querySelector('#nhq_restore_btn').addEventListener('click', () => {
+            modal.querySelector('#nhq_restore_input').click();
+        });
+
+        // 处理文件选择与导入
+        modal.querySelector('#nhq_restore_input').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+
+            const reader = new FileReader();
+            reader.onload = (event) => {
+                try {
+                    const importedData = JSON.parse(event.target.result);
+                    if (!Array.isArray(importedData)) {
+                        throw new Error('文件格式不正确，必须是数组');
+                    }
+
+                    let addedCount = 0;
+                    // 合并逻辑：将文件中的记录合并到当前记录中（去重）
+                    importedData.forEach(gid => {
+                        if (!downloadedSet.has(String(gid))) {
+                            downloadedSet.add(String(gid));
+                            addedCount++;
+                        }
+                    });
+
+                    localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
+                    notify(`<div class='title'>恢复成功</div>成功导入 ${addedCount} 条新记录<br>当前总记录：${downloadedSet.size}`);
+                    
+                    // 1.5秒后刷新页面以应用变更
+                    setTimeout(() => location.reload(), 1500);
+                } catch (err) {
+                    console.error(err);
+                    notify(`<div class='title'>导入失败</div>文件格式错误或已损坏`, 4000);
+                }
+            };
+            reader.readAsText(file);
+        });
 
         // 同步历史记录：从 qBittorrent 获取所有种子并更新本地 Set
         modal.querySelector('#nhq_sync').addEventListener('click', async () => {
