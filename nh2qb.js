@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nHentai → qBittorrent
 // @namespace    http://tampermonkey.net/
-// @version      2.4
+// @version      2.4.1
 // @updateURL    https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
 // @downloadURL  https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
 // @description  在 nHentai 页面添加按钮，支持批量推送到 qBittorrent、美观通知栏、设置弹窗、自动记忆复选框状态、封面右下角快捷复制链接
@@ -98,7 +98,7 @@
      **************************************************************************/
 
     // qBittorrent 连接配置
-    let QB_URL  = localStorage.getItem('qb_url')  || 'http://192.168.1.1:8848';
+    let QB_URL  = localStorage.getItem('qb_url')  || 'http://127.0.0.1:8080';
     let QB_USER = localStorage.getItem('qb_user') || 'admin';
     let QB_PASS = localStorage.getItem('qb_pass') || 'adminadmin';
 
