@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nHentai → qBittorrent
 // @namespace    http://tampermonkey.net/
-// @version      2.4.2
+// @version      2.4.3
 // @updateURL    https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
 // @downloadURL  https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
 // @description  在 nHentai 页面添加按钮，支持批量推送到 qBittorrent、美观通知栏、设置弹窗、自动记忆复选框状态、封面右下角快捷复制链接 (适配 SvelteKit 新版页面)
@@ -29,18 +29,14 @@
      **************************************************************************/
 
     GM_addStyle(`
-        /* 右上角通知浮层容器 */
         #nh-qb-container { position: fixed; right: 20px; top: 20px; z-index: 2147483647; display: flex; flex-direction: column; align-items: flex-end; pointer-events: none; }
-        /* 单条通知卡片样式 */
         .nh-qb-notify { position: relative; margin-bottom: 10px; width: 220px; max-width: calc(100vw - 40px); background: rgba(18,18,18,0.95); color: #fff; padding: 12px 14px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); transform: translateX(250px); transition: transform 0.36s cubic-bezier(.2,.9,.2,1), opacity 0.36s; pointer-events: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; font-size: 13px; opacity: 0; }
         .nh-qb-notify.show { transform: translateX(0); opacity: 1; }
         .nh-qb-notify .title { font-weight:600; margin-bottom:6px; color: #ed2553; }
         .nh-qb-notify .line { margin-top:6px; }
         .nh-qb-notify .error { color: #ff8b8b; font-weight:600; }
-        /* 页面右下角悬浮按钮组 */
         .nh-qb-fixed-btn { position:fixed; bottom:20px; right:10px; z-index:99999; }
         .nh-qb-fixed-btn .btn { margin-left:6px; }
-        /* 封面卡片右下角的复制链接按钮 */
         .nh-copy-link-btn { position: absolute; bottom: 6px; right: 6px; z-index: 30; background: rgba(0, 0, 0, 0.75); color: #fff; border: none; padding: 4px 8px; border-radius: 4px; font-size: 11px; cursor: pointer; opacity: 1; transition: background 0.2s; }
         .gallery:hover .nh-copy-link-btn { opacity: 1; }
         .nh-copy-link-btn:hover { background: rgba(237, 37, 83, 0.9); }
@@ -120,7 +116,7 @@
                 method: 'GET', url: torrentUrl, responseType: 'arraybuffer', withCredentials: true,
                 headers: { 'Referer': window.location.href },
                 onload: tRes => {
-                    if (tRes.status !== 200) return resolve({ ok:false, gid, title, error: `download status ${tRes.status}` });
+                    if (tRes.status !== 200) return resolve({ ok:false, gid, title, error: `获取种子失败: ${tRes.status} (可能种子未生成)` });
                     const blob = new Blob([tRes.response], { type: 'application/x-bittorrent' });
                     const cleanTitle = sanitizeFileName(title);
                     const finalPath = QB_PATH.replace(/\/$/, '') + '/' + cleanTitle + '/' + gid;
@@ -130,12 +126,12 @@
                         method: 'POST', url: QB_URL.replace(/\/$/, '') + '/api/v2/torrents/add', data: fd,
                         onload: upRes => {
                             if (upRes.status >= 200 && upRes.status < 300 || upRes.responseText.includes('Ok.')) resolve({ ok:true, gid, title });
-                            else resolve({ ok:false, gid, title, error: `upload status ${upRes.status}` });
+                            else resolve({ ok:false, gid, title, error: `推送到qB失败: ${upRes.status}` });
                         },
-                        onerror: () => resolve({ ok:false, gid, title, error: 'upload error' })
+                        onerror: () => resolve({ ok:false, gid, title, error: 'qB接口网络报错' })
                     });
                 },
-                onerror: () => resolve({ ok:false, gid, title, error: 'download error' })
+                onerror: () => resolve({ ok:false, gid, title, error: 'nHentai网络请求阻断' })
             });
         });
     }
@@ -146,7 +142,6 @@
     
     function addSinglePageButton() {
         const downloadAnchor = document.querySelector("a[href*='/download']");
-        // 防止 SPA 路由重复注入
         if (!downloadAnchor || downloadAnchor.hasAttribute('data-nh-injected')) return;
         downloadAnchor.setAttribute('data-nh-injected', 'true');
 
@@ -162,7 +157,8 @@
 
         btn.addEventListener('click', async () => {
             const gid = location.pathname.split('/')[2];
-            const title = document.querySelector('#info h1')?.innerText?.trim() || gid;
+            // 优先抓取带有作者信息的 h2 日文/中文标题，抓不到再抓 h1，最后兜底 gid
+            const title = document.querySelector('#info h2')?.innerText?.trim() || document.querySelector('#info h1')?.innerText?.trim() || gid;
             let loginToast;
             try { loginToast = notify(`<div class='title'>正在登录 qBittorrent…</div>`); await loginQB(); loginToast.close(); } 
             catch (e) { if (loginToast) loginToast.close(); notify(`<div class='title'>登录失败</div>无法登录 qBittorrent，请检查设置。`, 6000); return; }
@@ -176,7 +172,10 @@
                 downloadedSet.add(gid); localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
                 btn.innerText = '已下载 (再次推送)'; btn.style.backgroundColor = '#4caf50'; btn.style.borderColor = '#4caf50';
             }
-            else notify(`<div class='title'>推送完成（有失败）</div>成功：0/1<br><span class='error'>失败：${res.gid} - ${escapeHtml(res.title)}</span>` , 8000);
+            else {
+                // 增加了具体的错误原因展示 (res.error)
+                notify(`<div class='title'>推送完成（有失败）</div>成功：0/1<br><span class='error'>失败：${res.gid} - ${escapeHtml(res.title)}</span><br><span style="color:#ffc107;font-size:12px;">原因：${res.error}</span>` , 10000);
+            }
         });
     }
 
@@ -185,7 +184,6 @@
      **************************************************************************/
 
     function addBatchFeature() {
-        // --- 确保全局界面元素只注入一次 ---
         const HISTORY_KEY = 'nh_qb_push_history_v2';
         const OLD_KEY = 'nh_qb_pushed_max_gid';
         const getBjTime = () => new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
@@ -277,7 +275,9 @@
 
                 const successCount = successItems.length;
                 const failed = results.filter(r => !r.ok);
-                let failedHtml = failed.length ? '<div class="line"><strong>失败列表：</strong>' + failed.map(f => `<div class="error">${f.gid} - ${escapeHtml(f.title)}</div>`).join('') + '</div>' : '';
+                
+                // 批量失败列表中附加具体的错误原因
+                let failedHtml = failed.length ? '<div class="line"><strong>失败列表：</strong>' + failed.map(f => `<div class="error" style="margin-bottom:6px">${f.gid} - ${escapeHtml(f.title)}<br><span style="color:#ffc107;font-size:11px;">[${escapeHtml(f.error)}]</span></div>`).join('') + '</div>' : '';
 
                 progressNotify.close();
                 notify(`<div class='title'>推送完成</div>成功：${successCount}/${total}` + failedHtml, 8000 + failed.length*2000);
@@ -293,8 +293,6 @@
             document.getElementById('nhqb_settings').addEventListener('click', showSettingsModal);
         }
 
-        // --- 循环处理每个本子封面 ---
-        // 增量处理未被标记注入过的封面
         const thumbs = document.querySelectorAll('.gallery:not([data-nh-injected])');
         thumbs.forEach(thumb => {
             thumb.setAttribute('data-nh-injected', 'true');
@@ -308,7 +306,6 @@
             const title = (thumb.querySelector('.caption')?.innerText || gid).trim();
             thumb.style.position = 'relative';
 
-            // ⚠️ 关键更新：使用 classList.contains('lang-cn') 判断中文，替代原先的 data-tags
             const isChinese = thumb.classList.contains('lang-cn') || title.includes('[Chinese]') || title.includes('汉化');
             if (isChinese) {
                 const caption = thumb.querySelector('.caption');
@@ -477,7 +474,6 @@
             addBatchFeature();
         }
 
-        // 全局兜底设置按钮
         if (!document.getElementById('nhqb_settings_fallback')) {
             const fix = document.createElement('div');
             fix.id = 'nhqb_settings_fallback';
@@ -488,12 +484,9 @@
         }
     }
 
-    // 初次加载执行
     initFeatures();
 
-    // 持续监听页面 Svelte 动态刷新或局部渲染，发现新内容重新执行注入逻辑
     const observer = new MutationObserver(() => {
-        // 使用简单的防抖避免大量重复触发卡顿
         if (window.nhqb_timeout) clearTimeout(window.nhqb_timeout);
         window.nhqb_timeout = setTimeout(initFeatures, 300);
     });
