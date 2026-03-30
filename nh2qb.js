@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         nHentai → qBittorrent
 // @namespace    http://tampermonkey.net/
-// @version      2.4.3
+// @version      2.4.9
 // @updateURL    https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
 // @downloadURL  https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
-// @description  在 nHentai 页面添加按钮，支持批量推送到 qBittorrent、美观通知栏、设置弹窗、自动记忆复选框状态、封面右下角快捷复制链接 (适配 SvelteKit 新版页面)
+// @description  在 nHentai 页面添加按钮，支持批量推送到 qBittorrent、美观通知栏、设置弹窗、自动记忆复选框状态、封面右下角快捷复制链接 (使用 requestAnimationFrame 彻底解决 SPA 页面闪烁问题)
 // @author       Paccu
 // @match        https://nhentai.net/g/*
 // @match        https://nhentai.net/
@@ -40,6 +40,9 @@
         .nh-copy-link-btn { position: absolute; bottom: 6px; right: 6px; z-index: 30; background: rgba(0, 0, 0, 0.75); color: #fff; border: none; padding: 4px 8px; border-radius: 4px; font-size: 11px; cursor: pointer; opacity: 1; transition: background 0.2s; }
         .gallery:hover .nh-copy-link-btn { opacity: 1; }
         .nh-copy-link-btn:hover { background: rgba(237, 37, 83, 0.9); }
+        .nh-caption-cn { position: absolute !important; top: 100% !important; bottom: auto !important; left: 0 !important; width: 100% !important; z-index: 20 !important; border: 3px solid rgba(255, 0, 0, 0.5) !important; box-shadow: 0 0 6px rgba(255, 0, 0, 0.8) !important; box-sizing: border-box !important; background-color: #404040 !important; color: #d9d9d9 !important; line-height: 15px !important; height: auto !important; max-height: 42px !important; overflow: hidden !important; white-space: normal !important; transition: max-height 0.3s ease !important; }
+        .gallery:hover .nh-caption-cn { max-height: 300px !important; }
+        .nh-cover-dimmed { filter: brightness(0.6) !important; }
     `);
 
     /**************************************************************************
@@ -52,20 +55,40 @@
     let QB_PATH = localStorage.getItem('qb_path') || '/downloads';
 
     const CHECK_KEY = 'nh_qb_checked';
-    let savedChecked = {};
-    try { savedChecked = JSON.parse(localStorage.getItem(CHECK_KEY) || '{}'); } catch(e) { savedChecked = {}; }
-
     const DOWNLOADED_KEY = 'nh_qb_downloaded_gids';
+    let savedChecked = {};
     let downloadedSet = new Set();
-    try {
-        const stored = JSON.parse(localStorage.getItem(DOWNLOADED_KEY) || '[]');
-        if (Array.isArray(stored)) downloadedSet = new Set(stored);
-    } catch (e) { console.error('History load error', e); }
+
+    function syncLocalState() {
+        try { savedChecked = JSON.parse(localStorage.getItem(CHECK_KEY) || '{}'); } catch(e) { savedChecked = {}; }
+        try {
+            const stored = JSON.parse(localStorage.getItem(DOWNLOADED_KEY) || '[]');
+            if (Array.isArray(stored)) downloadedSet = new Set(stored);
+        } catch (e) { console.error('History load error', e); }
+
+        let needsUpdate = false;
+        for (let gid of Object.keys(savedChecked)) {
+            if (downloadedSet.has(String(gid))) {
+                delete savedChecked[gid];
+                needsUpdate = true;
+            }
+        }
+        if (needsUpdate) {
+            localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+        }
+    }
+
+    // 跨标签页同步状态
+    window.addEventListener('storage', (e) => {
+        if (e.key === DOWNLOADED_KEY || e.key === CHECK_KEY) {
+            requestRender();
+        }
+    });
 
     /**************************************************************************
      * 3. 基础工具函数 (Utilities)
      **************************************************************************/
-    
+
     function notify(html, duration = 5000) {
         let container = document.getElementById('nh-qb-container');
         if (!container) { container = document.createElement('div'); container.id = 'nh-qb-container'; document.body.appendChild(container); }
@@ -110,59 +133,95 @@
     }
 
     function pushTorrentPromise(gid, title) {
-        return new Promise((resolve) => {
+        return new Promise(async (resolve) => {
             const torrentUrl = `https://nhentai.net/g/${gid}/download`;
-            GM_xmlhttpRequest({
-                method: 'GET', url: torrentUrl, responseType: 'arraybuffer', withCredentials: true,
-                headers: { 'Referer': window.location.href },
-                onload: tRes => {
-                    if (tRes.status !== 200) return resolve({ ok:false, gid, title, error: `获取种子失败: ${tRes.status} (可能种子未生成)` });
-                    const blob = new Blob([tRes.response], { type: 'application/x-bittorrent' });
-                    const cleanTitle = sanitizeFileName(title);
-                    const finalPath = QB_PATH.replace(/\/$/, '') + '/' + cleanTitle + '/' + gid;
-                    const fd = new FormData();
-                    fd.append('torrents', blob, `${gid}.torrent`); fd.append('rename', cleanTitle); fd.append('savepath', finalPath); fd.append('root_folder', 'true');
-                    GM_xmlhttpRequest({
-                        method: 'POST', url: QB_URL.replace(/\/$/, '') + '/api/v2/torrents/add', data: fd,
-                        onload: upRes => {
-                            if (upRes.status >= 200 && upRes.status < 300 || upRes.responseText.includes('Ok.')) resolve({ ok:true, gid, title });
-                            else resolve({ ok:false, gid, title, error: `推送到qB失败: ${upRes.status}` });
-                        },
-                        onerror: () => resolve({ ok:false, gid, title, error: 'qB接口网络报错' })
-                    });
-                },
-                onerror: () => resolve({ ok:false, gid, title, error: 'nHentai网络请求阻断' })
-            });
+
+            try {
+                const tRes = await fetch(torrentUrl, {
+                    method: 'GET',
+                    headers: { 'Accept': 'application/x-bittorrent, application/octet-stream, */*' }
+                });
+
+                if (!tRes.ok) {
+                    return resolve({ ok:false, gid, title, error: `获取种子失败: HTTP ${tRes.status} (可能种子未生成)` });
+                }
+
+                const blob = await tRes.blob();
+
+                if (blob.type.includes('text/html')) {
+                    return resolve({ ok:false, gid, title, error: `下载被 Cloudflare 盾拦截` });
+                }
+
+                const cleanTitle = sanitizeFileName(title);
+                const finalPath = QB_PATH.replace(/\/$/, '') + '/' + cleanTitle + '/' + gid;
+                const fd = new FormData();
+                fd.append('torrents', blob, `${gid}.torrent`);
+                fd.append('rename', cleanTitle);
+                fd.append('savepath', finalPath);
+                fd.append('root_folder', 'true');
+
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url: QB_URL.replace(/\/$/, '') + '/api/v2/torrents/add',
+                    data: fd,
+                    onload: upRes => {
+                        if (upRes.status >= 200 && upRes.status < 300 || upRes.responseText.includes('Ok.')) resolve({ ok:true, gid, title });
+                        else resolve({ ok:false, gid, title, error: `推送到qB失败: ${upRes.status}` });
+                    },
+                    onerror: () => resolve({ ok:false, gid, title, error: 'qB接口网络报错 (请检查qB配置或网络通信)' })
+                });
+
+            } catch (err) {
+                return resolve({ ok:false, gid, title, error: `网络请求失败: ${err.message}` });
+            }
         });
     }
 
     /**************************************************************************
      * 5. 详情页功能 (Single Page Logic)
      **************************************************************************/
-    
+
     function addSinglePageButton() {
         const downloadAnchor = document.querySelector("a[href*='/download']");
-        if (!downloadAnchor || downloadAnchor.hasAttribute('data-nh-injected')) return;
-        downloadAnchor.setAttribute('data-nh-injected', 'true');
+        if (!downloadAnchor) return;
 
-        const btn = document.createElement('button');
-        btn.className = 'btn btn-primary';
-        const gid = location.pathname.split('/')[2];
-        if (downloadedSet.has(gid)) {
+        const currentGid = location.pathname.split('/')[2];
+        const isDownloaded = downloadedSet.has(currentGid);
+
+        let btn = downloadAnchor.parentNode.querySelector('.nh-custom-btn-single');
+
+        if (downloadAnchor.getAttribute('data-nh-gid') === currentGid) {
+            if (btn) {
+                if (isDownloaded) {
+                    btn.innerText = '已下载 (再次推送)';
+                    btn.style.backgroundColor = '#4caf50'; btn.style.borderColor = '#4caf50';
+                } else {
+                    btn.innerText = '推送到 qBittorrent';
+                    btn.style.backgroundColor = ''; btn.style.borderColor = '';
+                }
+            }
+            return;
+        }
+
+        if (btn) btn.remove();
+        downloadAnchor.setAttribute('data-nh-gid', currentGid);
+
+        btn = document.createElement('button');
+        btn.className = 'btn btn-primary nh-custom-btn-single';
+        if (isDownloaded) {
             btn.innerText = '已下载 (再次推送)';
             btn.style.backgroundColor = '#4caf50'; btn.style.borderColor = '#4caf50';
         } else { btn.innerText = '推送到 qBittorrent'; }
-        
+
         downloadAnchor.parentNode.appendChild(btn);
 
         btn.addEventListener('click', async () => {
             const gid = location.pathname.split('/')[2];
-            // 优先抓取带有作者信息的 h2 日文/中文标题，抓不到再抓 h1，最后兜底 gid
             const title = document.querySelector('#info h2')?.innerText?.trim() || document.querySelector('#info h1')?.innerText?.trim() || gid;
             let loginToast;
-            try { loginToast = notify(`<div class='title'>正在登录 qBittorrent…</div>`); await loginQB(); loginToast.close(); } 
+            try { loginToast = notify(`<div class='title'>正在登录 qBittorrent…</div>`); await loginQB(); loginToast.close(); }
             catch (e) { if (loginToast) loginToast.close(); notify(`<div class='title'>登录失败</div>无法登录 qBittorrent，请检查设置。`, 6000); return; }
-            
+
             const startToast = notify(`<div class='title'>开始推送</div>正在下载并推送：${gid} - ${escapeHtml(title)}`);
             const res = await pushTorrentPromise(gid, title);
             startToast.close();
@@ -170,10 +229,8 @@
             if (res.ok) {
                 notify(`<div class='title'>推送成功</div>成功：1/1`);
                 downloadedSet.add(gid); localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
-                btn.innerText = '已下载 (再次推送)'; btn.style.backgroundColor = '#4caf50'; btn.style.borderColor = '#4caf50';
-            }
-            else {
-                // 增加了具体的错误原因展示 (res.error)
+                requestRender();
+            } else {
                 notify(`<div class='title'>推送完成（有失败）</div>成功：0/1<br><span class='error'>失败：${res.gid} - ${escapeHtml(res.title)}</span><br><span style="color:#ffc107;font-size:12px;">原因：${res.error}</span>` , 10000);
             }
         });
@@ -224,13 +281,16 @@
                     if (isDownloaded) { cb.checked = false; delete savedChecked[cb.dataset.gid]; }
                     return !isDownloaded;
                 });
-                
+
                 const skippedCount = allChecked.length - checked.length;
                 if (skippedCount > 0) notify(`<div class='title'>自动去重</div>已自动跳过 ${skippedCount} 个已下载的任务`, 4000);
-                if (checked.length === 0) return;
+                if (checked.length === 0) {
+                    localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+                    return;
+                }
 
                 let loginToast;
-                try { loginToast = notify(`<div class='title'>正在登录 qBittorrent…</div>`); await loginQB(); loginToast.close(); } 
+                try { loginToast = notify(`<div class='title'>正在登录 qBittorrent…</div>`); await loginQB(); loginToast.close(); }
                 catch (e) { if (loginToast) loginToast.close(); notify(`<div class='title'>登录失败</div>无法登录 qBittorrent，请检查设置。`, 6000); return; }
 
                 const total = checked.length;
@@ -238,29 +298,20 @@
 
                 const results = await Promise.all(checked.map(cb => {
                     const gid = cb.dataset.gid; const title = cb.dataset.title;
-                    cb.checked = false; delete savedChecked[gid];
                     return pushTorrentPromise(gid, title);
                 }));
 
-                localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
-
                 const successItems = results.filter(r => r.ok);
                 if (successItems.length > 0) {
-                    successItems.forEach(item => downloadedSet.add(item.gid));
-                    localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
-                    
                     successItems.forEach(item => {
+                        downloadedSet.add(item.gid);
+                        delete savedChecked[item.gid];
                         const cb = document.querySelector(`input[data-gid="${item.gid}"]`);
-                        if (cb) {
-                            const thumb = cb.closest('.gallery');
-                            if (thumb && !thumb.querySelector('.downloaded-tag')) {
-                                const tag = document.createElement('div'); tag.className = 'downloaded-tag';
-                                tag.style.cssText = 'position:absolute;top:0;left:0;background:#4caf50;color:#fff;font-size:12px;padding:2px 6px;z-index:25;border-bottom-right-radius:4px;font-weight:bold;box-shadow:2px 2px 4px rgba(0,0,0,0.5);';
-                                tag.innerText = '已下载'; thumb.appendChild(tag);
-                                const cover = thumb.querySelector('.cover'); if(cover) cover.style.filter = 'brightness(0.6)';
-                            }
-                        }
+                        if (cb) cb.checked = false;
                     });
+
+                    localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+                    localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
 
                     const currentBatchGids = successItems.map(r => parseInt(r.gid));
                     const currentBatchMax = Math.max(...currentBatchGids);
@@ -271,12 +322,11 @@
                         const infoEl = document.getElementById('nh-max-gid-display');
                         if(infoEl) infoEl.innerHTML = renderGidInfo(pushHistory);
                     }
+                    requestRender();
                 }
 
                 const successCount = successItems.length;
                 const failed = results.filter(r => !r.ok);
-                
-                // 批量失败列表中附加具体的错误原因
                 let failedHtml = failed.length ? '<div class="line"><strong>失败列表：</strong>' + failed.map(f => `<div class="error" style="margin-bottom:6px">${f.gid} - ${escapeHtml(f.title)}<br><span style="color:#ffc107;font-size:11px;">[${escapeHtml(f.error)}]</span></div>`).join('') + '</div>' : '';
 
                 progressNotify.close();
@@ -293,33 +343,54 @@
             document.getElementById('nhqb_settings').addEventListener('click', showSettingsModal);
         }
 
-        const thumbs = document.querySelectorAll('.gallery:not([data-nh-injected])');
+        const thumbs = document.querySelectorAll('.gallery');
         thumbs.forEach(thumb => {
-            thumb.setAttribute('data-nh-injected', 'true');
-            
             const a = thumb.querySelector('a'); if (!a) return;
             const href = a.href || '';
             const m = href.match(/\/g\/(\d+)\//) || href.match(/\/g\/(\d+)$/);
             const gid = m ? m[1] : (href.split('/g/')[1] ? href.split('/g/')[1].split('/')[0] : null);
             if (!gid) return;
 
+            const isDownloaded = downloadedSet.has(gid);
+
+            if (thumb.getAttribute('data-nh-gid') === gid) {
+                const cover = thumb.querySelector('.cover');
+                let tag = thumb.querySelector('.downloaded-tag');
+                if (isDownloaded) {
+                    if (!tag) {
+                        tag = document.createElement('div');
+                        tag.className = 'downloaded-tag nh-custom-injected';
+                        tag.style.cssText = 'position:absolute;top:0;left:0;background:#4caf50;color:#fff;font-size:12px;padding:2px 6px;z-index:25;border-bottom-right-radius:4px;font-weight:bold;box-shadow:2px 2px 4px rgba(0,0,0,0.5);';
+                        tag.innerText = '已下载'; thumb.appendChild(tag);
+                    }
+                    if (cover) cover.classList.add('nh-cover-dimmed');
+                } else {
+                    if (tag) tag.remove();
+                    if (cover) cover.classList.remove('nh-cover-dimmed');
+                }
+
+                const cb = thumb.querySelector('input[type=checkbox]');
+                if (cb) cb.checked = !!savedChecked[gid];
+
+                return;
+            }
+
+            thumb.querySelectorAll('.nh-custom-injected').forEach(el => el.remove());
+            thumb.setAttribute('data-nh-gid', gid);
+
             const title = (thumb.querySelector('.caption')?.innerText || gid).trim();
             thumb.style.position = 'relative';
 
             const isChinese = thumb.classList.contains('lang-cn') || title.includes('[Chinese]') || title.includes('汉化');
-            if (isChinese) {
-                const caption = thumb.querySelector('.caption');
-                if (caption) {
-                    caption.style.position = 'absolute'; caption.style.top = '100%'; caption.style.bottom = 'auto'; caption.style.left = '0'; caption.style.width = '100%'; caption.style.zIndex = '20';
-                    caption.style.border = '3px solid rgba(255, 0, 0, 0.5)'; caption.style.boxShadow = '0 0 6px rgba(255, 0, 0, 0.8)'; caption.style.boxSizing = 'border-box'; caption.style.backgroundColor = '#404040'; caption.style.color = '#d9d9d9'; caption.style.lineHeight = '15px';
-                    caption.style.height = 'auto'; caption.style.maxHeight = '42px'; caption.style.overflow = 'hidden'; caption.style.whiteSpace = 'normal'; caption.style.transition = 'max-height 0.3s ease';
-                    thumb.addEventListener('mouseenter', () => { caption.style.maxHeight = '300px'; });
-                    thumb.addEventListener('mouseleave', () => { caption.style.maxHeight = '42px'; });
-                }
+            const caption = thumb.querySelector('.caption');
+            if (caption) {
+                if (isChinese) caption.classList.add('nh-caption-cn');
+                else caption.classList.remove('nh-caption-cn');
             }
 
             const cb = document.createElement('input');
             cb.type = 'checkbox'; cb.dataset.gid = gid; cb.dataset.title = title;
+            cb.className = 'nh-custom-injected';
             cb.style.cssText = 'position:absolute;top:6px;right:6px;z-index:20;width:27px;height:27px;transform:scale(1.05);';
             if (isChinese) {
                 cb.style.accentColor = '#ff0000'; cb.style.boxShadow = '0 0 12px rgba(255, 0, 0, 1)'; cb.style.outline = '2px solid #ff0000'; cb.style.outlineOffset = '-2px'; cb.style.margin = '1px';
@@ -330,16 +401,20 @@
                 localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
             });
 
-            if (downloadedSet.has(gid)) {
+            const cover = thumb.querySelector('.cover');
+            if (isDownloaded) {
                 const tag = document.createElement('div');
+                tag.className = 'downloaded-tag nh-custom-injected';
                 tag.style.cssText = 'position:absolute;top:0;left:0;background:#4caf50;color:#fff;font-size:12px;padding:2px 6px;z-index:25;border-bottom-right-radius:4px;font-weight:bold;box-shadow:2px 2px 4px rgba(0,0,0,0.5);';
                 tag.innerText = '已下载'; thumb.appendChild(tag);
-                const cover = thumb.querySelector('.cover'); if(cover) cover.style.filter = 'brightness(0.6)';
+                if(cover) cover.classList.add('nh-cover-dimmed');
+            } else {
+                if(cover) cover.classList.remove('nh-cover-dimmed');
             }
             thumb.appendChild(cb);
 
             const copyBtn = document.createElement('button');
-            const fullLink = a.href; copyBtn.className = 'nh-copy-link-btn'; copyBtn.innerText = '复制链接';
+            const fullLink = a.href; copyBtn.className = 'nh-copy-link-btn nh-custom-injected'; copyBtn.innerText = '复制链接';
             copyBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); e.stopImmediatePropagation(); copyToClipboard(fullLink); };
             thumb.appendChild(copyBtn);
         });
@@ -393,7 +468,7 @@
                     importedData.forEach(gid => { if (!downloadedSet.has(String(gid))) { downloadedSet.add(String(gid)); addedCount++; } });
                     localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
                     notify(`<div class='title'>恢复成功</div>成功导入 ${addedCount} 条新记录<br>当前总记录：${downloadedSet.size}`);
-                    setTimeout(() => location.reload(), 1500);
+                    requestRender();
                 } catch (err) { console.error(err); notify(`<div class='title'>导入失败</div>文件格式错误或已损坏`, 4000); }
             };
             reader.readAsText(file);
@@ -409,13 +484,13 @@
                         try {
                             const torrents = JSON.parse(response.responseText); let newCount = 0;
                             torrents.forEach(t => {
-                                const parts = t.save_path.split(/[/\\]/); const folderName = parts[parts.length - 1]; 
+                                const parts = t.save_path.split(/[/\\]/); const folderName = parts[parts.length - 1];
                                 if (/^\d+$/.test(folderName) && !downloadedSet.has(folderName)) { downloadedSet.add(folderName); newCount++; }
                             });
                             localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
                             notify(`<div class='title'>同步成功</div>新增记录：${newCount} 条<br>当前总记录：${downloadedSet.size} 条`);
-                            setTimeout(() => location.reload(), 1500);
-                        } catch (e) { notify(`<div class='title'>解析失败</div>数据格式错误或 qB 响应异常`, 5000); console.error(e); } 
+                            requestRender();
+                        } catch (e) { notify(`<div class='title'>解析失败</div>数据格式错误或 qB 响应异常`, 5000); console.error(e); }
                         finally { btn.innerText = originalText; btn.disabled = false; }
                     },
                     onerror: function() { notify(`<div class='title'>同步失败</div>网络请求错误`, 5000); btn.innerText = originalText; btn.disabled = false; }
@@ -452,11 +527,10 @@
         const randomLinks = document.querySelectorAll('a[href="/random/"]');
         randomLinks.forEach(link => {
             const currentLi = link.closest('li');
-            if (!currentLi || currentLi.hasAttribute('data-nh-injected')) return;
-            currentLi.setAttribute('data-nh-injected', 'true');
+            if (!currentLi || (currentLi.previousElementSibling && currentLi.previousElementSibling.classList.contains('nh-chinese-link'))) return;
 
             const newLi = document.createElement('li');
-            newLi.className = currentLi.className;
+            newLi.className = currentLi.className + ' nh-chinese-link';
             newLi.innerHTML = '<a href="/search/?q=chinese">Chinese</a>';
             currentLi.parentNode.insertBefore(newLi, currentLi);
         });
@@ -467,6 +541,8 @@
      **************************************************************************/
 
     function initFeatures() {
+        syncLocalState();
+
         customizeUI();
         if (location.pathname.startsWith('/g/')) {
             addSinglePageButton();
@@ -484,11 +560,23 @@
         }
     }
 
-    initFeatures();
+    // 将渲染调度封装，利用 requestAnimationFrame 防抖且消除闪烁
+    let isScheduled = false;
+    function requestRender() {
+        if (!isScheduled) {
+            isScheduled = true;
+            requestAnimationFrame(() => {
+                initFeatures();
+                isScheduled = false;
+            });
+        }
+    }
 
+    requestRender(); // 初次加载渲染
+
+    // 监听 DOM 变化
     const observer = new MutationObserver(() => {
-        if (window.nhqb_timeout) clearTimeout(window.nhqb_timeout);
-        window.nhqb_timeout = setTimeout(initFeatures, 300);
+        requestRender();
     });
     observer.observe(document.body, { childList: true, subtree: true });
 
