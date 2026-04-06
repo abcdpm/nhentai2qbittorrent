@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         nHentai → qBittorrent
 // @namespace    http://tampermonkey.net/
-// @version      2.4.12
+// @version      2.4.13
 // @updateURL    https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
 // @downloadURL  https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
-// @description  在 nHentai 页面添加按钮，支持批量推送到 qBittorrent、美观通知栏、设置弹窗、自动记忆复选框状态、封面右下角快捷复制链接 (重构设置界面为暗色主题，优化输入框样式)
+// @description  在 nHentai 页面添加按钮，支持批量推送到 qBittorrent、美观通知栏、设置弹窗、自动记忆复选框状态、封面右下角快捷复制链接 (新增：左下角一键全选中文本子/取消全选功能)
 // @author       Paccu
 // @match        https://nhentai.net/g/*
 // @match        https://nhentai.net/
@@ -281,6 +281,61 @@
             maxIdInfo.innerHTML = renderGidInfo(pushHistory);
             document.body.appendChild(maxIdInfo);
         }
+
+        // ================= 新增：左下角全选/取消全选 面板 =================
+        if (!document.getElementById('nhqb_left_panel')) {
+            const leftPanel = document.createElement('div');
+            leftPanel.id = 'nhqb_left_panel';
+            leftPanel.style.cssText = 'position:fixed;bottom:20px;left:20px;z-index:99999;display:flex;flex-direction:column;gap:8px;';
+            leftPanel.innerHTML = `
+                <button id="nhqb_select_cn" class="btn btn-primary">全选中文本子</button>
+                <button id="nhqb_deselect_all" class="btn btn-secondary">取消全部选中</button>
+            `;
+            document.body.appendChild(leftPanel);
+
+            // 绑定全选事件
+            document.getElementById('nhqb_select_cn').addEventListener('click', () => {
+                let count = 0;
+                document.querySelectorAll('.gallery').forEach(thumb => {
+                    const cb = thumb.querySelector('input[type="checkbox"]');
+                    if (!cb) return;
+
+                    const gid = cb.dataset.gid;
+                    const title = cb.dataset.title || '';
+                    const isDownloaded = downloadedSet.has(gid);
+                    const isChinese = thumb.classList.contains('lang-cn') || title.includes('[Chinese]') || title.includes('汉化');
+
+                    // 只选中未被下载且是中文的本子
+                    if (isChinese && !isDownloaded && !cb.checked) {
+                        cb.checked = true;
+                        savedChecked[gid] = title;
+                        count++;
+                    }
+                });
+                localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+                if (count > 0) notify(`<div class='title'>全选完成</div>已自动选中本页 ${count} 个未下载的中文本子`);
+                else notify(`<div class='title'>全选提示</div>当前页面没有找到需要勾选的中文本子`);
+            });
+
+            // 绑定取消全选事件
+            document.getElementById('nhqb_deselect_all').addEventListener('click', () => {
+                let count = 0;
+                document.querySelectorAll('.gallery').forEach(thumb => {
+                    const cb = thumb.querySelector('input[type="checkbox"]');
+                    if (!cb) return;
+
+                    const gid = cb.dataset.gid;
+                    if (cb.checked) {
+                        cb.checked = false;
+                        delete savedChecked[gid];
+                        count++;
+                    }
+                });
+                localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+                if (count > 0) notify(`<div class='title'>取消选中</div>已清空本页 ${count} 个选中状态`);
+            });
+        }
+        // =================================================================
 
         if (!document.getElementById('nhqb_batch_btn')) {
             const batchBtn = document.createElement('button');
