@@ -1,10 +1,10 @@
 // ==UserScript==
 // @name         nHentai → qBittorrent
 // @namespace    http://tampermonkey.net/
-// @version      2.4.9
+// @version      2.4.12
 // @updateURL    https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
 // @downloadURL  https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
-// @description  在 nHentai 页面添加按钮，支持批量推送到 qBittorrent、美观通知栏、设置弹窗、自动记忆复选框状态、封面右下角快捷复制链接 (使用 requestAnimationFrame 彻底解决 SPA 页面闪烁问题)
+// @description  在 nHentai 页面添加按钮，支持批量推送到 qBittorrent、美观通知栏、设置弹窗、自动记忆复选框状态、封面右下角快捷复制链接 (重构设置界面为暗色主题，优化输入框样式)
 // @author       Paccu
 // @match        https://nhentai.net/g/*
 // @match        https://nhentai.net/
@@ -37,12 +37,30 @@
         .nh-qb-notify .error { color: #ff8b8b; font-weight:600; }
         .nh-qb-fixed-btn { position:fixed; bottom:20px; right:10px; z-index:99999; }
         .nh-qb-fixed-btn .btn { margin-left:6px; }
-        .nh-copy-link-btn { position: absolute; bottom: 6px; right: 6px; z-index: 30; background: rgba(0, 0, 0, 0.75); color: #fff; border: none; padding: 4px 8px; border-radius: 4px; font-size: 11px; cursor: pointer; opacity: 1; transition: background 0.2s; }
+        .nh-copy-link-btn { position: absolute; bottom: 6px; right: 6px; z-index: 30; background: rgba(0, 0, 0, 0.75); color: #fff; border: none; padding: 4px 8px; border-radius: 4px; font-size: 11px; cursor: pointer; opacity: 1; transition: background 0.2s; display: inline-flex; align-items: center; justify-content: center; }
         .gallery:hover .nh-copy-link-btn { opacity: 1; }
         .nh-copy-link-btn:hover { background: rgba(237, 37, 83, 0.9); }
         .nh-caption-cn { position: absolute !important; top: 100% !important; bottom: auto !important; left: 0 !important; width: 100% !important; z-index: 20 !important; border: 3px solid rgba(255, 0, 0, 0.5) !important; box-shadow: 0 0 6px rgba(255, 0, 0, 0.8) !important; box-sizing: border-box !important; background-color: #404040 !important; color: #d9d9d9 !important; line-height: 15px !important; height: auto !important; max-height: 42px !important; overflow: hidden !important; white-space: normal !important; transition: max-height 0.3s ease !important; }
         .gallery:hover .nh-caption-cn { max-height: 300px !important; }
         .nh-cover-dimmed { filter: brightness(0.6) !important; }
+
+        /* 修复新版 Svelte 架构下全局按钮颜色丢失的问题，使用 flex 保证绝对居中 */
+        .btn { padding: 8px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 14px; font-weight: bold; transition: background-color 0.2s; display: inline-flex; align-items: center; justify-content: center; font-family: inherit; text-align: center; box-sizing: border-box; line-height: normal; height: auto; min-height: 36px; }
+        .btn-primary { background-color: #ed2553 !important; color: #ffffff !important; }
+        .btn-primary:hover { background-color: #f0466d !important; }
+        .btn-secondary { background-color: #34353b !important; color: #ffffff !important; }
+        .btn-secondary:hover { background-color: #42444c !important; }
+        .btn:disabled { opacity: 0.6 !important; cursor: not-allowed !important; }
+
+        /* 设置弹窗暗色主题 */
+        .nhqb-modal { background: #222224; color: #e0e0e0; padding: 20px 24px; border-radius: 10px; min-width: 340px; width: 420px; max-width: 90%; box-shadow: 0 12px 48px rgba(0,0,0,0.8); font-size: 14px; border: 1px solid #3c3c3c; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+        .nhqb-modal h3 { margin-top: 0; color: #fff; border-bottom: 1px solid #3c3c3c; padding-bottom: 12px; margin-bottom: 18px; font-size: 18px; font-weight: 600; }
+        .nhqb-modal .field-group { margin-bottom: 14px; text-align: left; }
+        .nhqb-modal label { font-weight: 600; color: #bbb; display: block; margin-bottom: 6px; font-size: 13px; }
+        .nhqb-modal input[type="text"], .nhqb-modal input[type="password"] { width: 100%; padding: 10px 12px; background: #161618; color: #fff; border: 1px solid #444; border-radius: 6px; outline: none; transition: border-color 0.2s, box-shadow 0.2s; box-sizing: border-box; font-family: inherit; font-size: 14px; }
+        .nhqb-modal input[type="text"]:focus, .nhqb-modal input[type="password"]:focus { border-color: #ed2553; box-shadow: 0 0 0 2px rgba(237,37,83,0.25); }
+        .nhqb-modal .divider { margin-bottom: 16px; padding-top: 16px; border-top: 1px solid #3c3c3c; text-align: left; }
+        .nhqb-modal .btn-group { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
     `);
 
     /**************************************************************************
@@ -425,26 +443,32 @@
      **************************************************************************/
     function showSettingsModal() {
         const overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:2147483646;';
+        overlay.style.cssText = 'position:fixed;left:0;top:0;width:100%;height:100%;background:rgba(0,0,0,0.6);backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center;z-index:2147483646;';
 
         const modal = document.createElement('div');
-        modal.style.cssText = 'background:#fff;padding:18px;border-radius:8px;min-width:320px;max-width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.4);font-size:14px;color:#111;';
+        modal.className = 'nhqb-modal';
         modal.innerHTML = `
-            <h3 style='margin-top:0'>qBittorrent 配置</h3>
-            <div style='margin-bottom:8px'><label>地址：</label><input id='nhq_addr' style='width:100%;padding:6px;margin-top:4px' value='${escapeHtml(QB_URL)}'></div>
-            <div style='margin-bottom:8px'><label>下载根目录：</label><input id='nhq_path' style='width:100%;padding:6px;margin-top:4px' value='${escapeHtml(QB_PATH)}' placeholder='/downloads'></div>
-            <div style='margin-bottom:8px'><label>用户名：</label><input id='nhq_user' style='width:100%;padding:6px;margin-top:4px' value='${escapeHtml(QB_USER)}'></div>
-            <div style='margin-bottom:12px'><label>密码：</label><input id='nhq_pass' type='password' style='width:100%;padding:6px;margin-top:4px' value='${escapeHtml(QB_PASS)}'></div>
-            <div style='margin-bottom:12px;padding-top:12px;border-top:1px solid #eee;'>
+            <h3>qBittorrent 配置</h3>
+            <div class="field-group"><label>地址：</label><input type="text" id="nhq_addr" value="${escapeHtml(QB_URL)}"></div>
+            <div class="field-group"><label>下载根目录：</label><input type="text" id="nhq_path" value="${escapeHtml(QB_PATH)}" placeholder="/downloads"></div>
+            <div class="field-group"><label>用户名：</label><input type="text" id="nhq_user" value="${escapeHtml(QB_USER)}"></div>
+            <div class="field-group"><label>密码：</label><input type="password" id="nhq_pass" value="${escapeHtml(QB_PASS)}"></div>
+            
+            <div class="divider">
                 <label>历史记录管理：</label>
-                <button id='nhq_sync' class='btn btn-secondary' style='margin-top:4px;width:100%'>🔄 从 qBittorrent 同步已下载记录</button>
-                <div style="display:flex; gap:10px; margin-top:8px;">
-                    <button id='nhq_backup' class='btn btn-secondary' style='flex:1'>⬇️ 备份记录到本地</button>
-                    <button id='nhq_restore_btn' class='btn btn-secondary' style='flex:1'>⬆️ 从文件恢复记录</button>
-                    <input type="file" id="nhq_restore_input" accept=".json" style="display:none">
+                <button id="nhq_sync" class="btn btn-secondary" style="margin-top:6px;width:100%;">🔄 从 qBittorrent 同步已下载记录</button>
+                <div style="display:flex; gap:10px; margin-top:10px;">
+                    <button id="nhq_backup" class="btn btn-secondary" style="flex:1;">⬇️ 备份记录到本地</button>
+                    <button id="nhq_restore_btn" class="btn btn-secondary" style="flex:1;">⬆️ 从文件恢复记录</button>
+                    <input type="file" id="nhq_restore_input" accept=".json" style="display:none;">
                 </div>
             </div>
-            <div style='text-align:right'><button id='nhq_save' class='btn btn-primary'>保存</button> <button id='nhq_test' class='btn btn-secondary'>测试连接</button> <button id='nhq_cancel' class='btn btn-secondary'>取消</button></div>
+
+            <div class="btn-group">
+                <button id="nhq_test" class="btn btn-secondary">测试连接</button>
+                <button id="nhq_cancel" class="btn btn-secondary">取消</button>
+                <button id="nhq_save" class="btn btn-primary">保存</button>
+            </div>
         `;
 
         overlay.appendChild(modal); document.body.appendChild(overlay);
