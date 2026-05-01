@@ -1,10 +1,8 @@
 // ==UserScript==
-// @name         nHentai → qBittorrent
+// @name         nHentai → Local Image Scraper
 // @namespace    http://tampermonkey.net/
-// @version      2.4.13
-// @updateURL    https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
-// @downloadURL  https://github.com/abcdpm/nhentai2qbittorrent/raw/refs/heads/main/nh2qb.js
-// @description  在 nHentai 页面添加按钮，支持批量推送到 qBittorrent、美观通知栏、设置弹窗、自动记忆复选框状态、封面右下角快捷复制链接 (新增：左下角一键全选中文本子/取消全选功能)
+// @version      4.8.0
+// @description  放弃官方 ZIP API，直接提取高清原图。(重写极速探测机制，利用内存 Image 对象代替 HTTP 跨域请求，彻底消除油猴烦人的跨域允许弹窗)
 // @author       Paccu
 // @match        https://nhentai.net/g/*
 // @match        https://nhentai.net/
@@ -15,10 +13,9 @@
 // @match        https://nhentai.net/character/*
 // @match        https://nhentai.net/search/*
 // @match        https://nhentai.net/*?*
-// @grant        GM_xmlhttpRequest
+// @grant        GM_download
 // @grant        GM_addStyle
-// @connect      nhentai.net
-// @connect      *
+// @run-at       document-idle
 // ==/UserScript==
 
 (function() {
@@ -27,62 +24,70 @@
     /**************************************************************************
      * 1. 样式定义 (CSS Styles)
      **************************************************************************/
-
-    GM_addStyle(`
-        #nh-qb-container { position: fixed; right: 20px; top: 20px; z-index: 2147483647; display: flex; flex-direction: column; align-items: flex-end; pointer-events: none; }
-        .nh-qb-notify { position: relative; margin-bottom: 10px; width: 220px; max-width: calc(100vw - 40px); background: rgba(18,18,18,0.95); color: #fff; padding: 12px 14px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); transform: translateX(250px); transition: transform 0.36s cubic-bezier(.2,.9,.2,1), opacity 0.36s; pointer-events: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; font-size: 13px; opacity: 0; }
-        .nh-qb-notify.show { transform: translateX(0); opacity: 1; }
-        .nh-qb-notify .title { font-weight:600; margin-bottom:6px; color: #ed2553; }
-        .nh-qb-notify .line { margin-top:6px; }
-        .nh-qb-notify .error { color: #ff8b8b; font-weight:600; }
-        .nh-qb-fixed-btn { position:fixed; bottom:20px; right:10px; z-index:99999; }
-        .nh-qb-fixed-btn .btn { margin-left:6px; }
-        .nh-copy-link-btn { position: absolute; bottom: 6px; right: 6px; z-index: 30; background: rgba(0, 0, 0, 0.75); color: #fff; border: none; padding: 4px 8px; border-radius: 4px; font-size: 11px; cursor: pointer; opacity: 1; transition: background 0.2s; display: inline-flex; align-items: center; justify-content: center; }
-        .gallery:hover .nh-copy-link-btn { opacity: 1; }
-        .nh-copy-link-btn:hover { background: rgba(237, 37, 83, 0.9); }
-        .nh-caption-cn { position: absolute !important; top: 100% !important; bottom: auto !important; left: 0 !important; width: 100% !important; z-index: 20 !important; border: 3px solid rgba(255, 0, 0, 0.5) !important; box-shadow: 0 0 6px rgba(255, 0, 0, 0.8) !important; box-sizing: border-box !important; background-color: #404040 !important; color: #d9d9d9 !important; line-height: 15px !important; height: auto !important; max-height: 42px !important; overflow: hidden !important; white-space: normal !important; transition: max-height 0.3s ease !important; }
-        .gallery:hover .nh-caption-cn { max-height: 300px !important; }
-        .nh-cover-dimmed { filter: brightness(0.6) !important; }
-
-        /* 修复新版 Svelte 架构下全局按钮颜色丢失的问题，使用 flex 保证绝对居中 */
-        .btn { padding: 8px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 14px; font-weight: bold; transition: background-color 0.2s; display: inline-flex; align-items: center; justify-content: center; font-family: inherit; text-align: center; box-sizing: border-box; line-height: normal; height: auto; min-height: 36px; }
-        .btn-primary { background-color: #ed2553 !important; color: #ffffff !important; }
-        .btn-primary:hover { background-color: #f0466d !important; }
-        .btn-secondary { background-color: #34353b !important; color: #ffffff !important; }
-        .btn-secondary:hover { background-color: #42444c !important; }
-        .btn:disabled { opacity: 0.6 !important; cursor: not-allowed !important; }
-
-        /* 设置弹窗暗色主题 */
-        .nhqb-modal { background: #222224; color: #e0e0e0; padding: 20px 24px; border-radius: 10px; min-width: 340px; width: 420px; max-width: 90%; box-shadow: 0 12px 48px rgba(0,0,0,0.8); font-size: 14px; border: 1px solid #3c3c3c; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
-        .nhqb-modal h3 { margin-top: 0; color: #fff; border-bottom: 1px solid #3c3c3c; padding-bottom: 12px; margin-bottom: 18px; font-size: 18px; font-weight: 600; }
-        .nhqb-modal .field-group { margin-bottom: 14px; text-align: left; }
-        .nhqb-modal label { font-weight: 600; color: #bbb; display: block; margin-bottom: 6px; font-size: 13px; }
-        .nhqb-modal input[type="text"], .nhqb-modal input[type="password"] { width: 100%; padding: 10px 12px; background: #161618; color: #fff; border: 1px solid #444; border-radius: 6px; outline: none; transition: border-color 0.2s, box-shadow 0.2s; box-sizing: border-box; font-family: inherit; font-size: 14px; }
-        .nhqb-modal input[type="text"]:focus, .nhqb-modal input[type="password"]:focus { border-color: #ed2553; box-shadow: 0 0 0 2px rgba(237,37,83,0.25); }
-        .nhqb-modal .divider { margin-bottom: 16px; padding-top: 16px; border-top: 1px solid #3c3c3c; text-align: left; }
-        .nhqb-modal .btn-group { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
-    `);
+    function initUI() {
+        GM_addStyle(`
+            .gallery { position: relative !important; }
+            #nh-qb-container { position: fixed; right: 20px; top: 20px; z-index: 2147483647; display: flex; flex-direction: column; align-items: flex-end; pointer-events: none; }
+            .nh-qb-notify { position: relative; margin-bottom: 10px; width: 280px; max-width: calc(100vw - 40px); background: rgba(18,18,18,0.95); color: #fff; padding: 14px 16px; border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.5); transform: translateX(350px); transition: transform 0.36s cubic-bezier(.2,.9,.2,1), opacity 0.36s; pointer-events: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial; font-size: 13px; opacity: 0; cursor: pointer; border: 1px solid rgba(255,255,255,0.1); }
+            .nh-qb-notify.show { transform: translateX(0); opacity: 1; }
+            .nh-qb-notify:hover { border-color: rgba(255,255,255,0.2); }
+            .nh-qb-notify .title { font-weight:600; margin-bottom:6px; color: #ed2553; }
+            .nh-qb-notify .line { margin-top:6px; }
+            .nh-qb-notify .error { color: #ff8b8b; font-weight:600; }
+            
+            .nh-qb-notify-scroll { max-height: 180px; overflow-y: auto; margin-top: 8px; padding-right: 6px; font-size: 11px; }
+            .nh-qb-notify-scroll::-webkit-scrollbar { width: 4px; }
+            .nh-qb-notify-scroll::-webkit-scrollbar-thumb { background: #666; border-radius: 2px; }
+            
+            .nh-qb-fixed-btn { position:fixed; bottom:20px; right:10px; z-index:99999; }
+            .nh-qb-fixed-btn .btn { margin-left:6px; }
+            .nh-copy-link-btn { position: absolute; bottom: 6px; right: 6px; z-index: 30; background: rgba(0, 0, 0, 0.75); color: #fff; border: none; padding: 4px 8px; border-radius: 4px; font-size: 11px; cursor: pointer; opacity: 1; transition: background 0.2s; display: inline-flex; align-items: center; justify-content: center; }
+            .gallery:hover .nh-copy-link-btn { opacity: 1; }
+            .nh-copy-link-btn:hover { background: rgba(237, 37, 83, 0.9); }
+            .nh-caption-cn { position: absolute !important; top: 100% !important; bottom: auto !important; left: 0 !important; width: 100% !important; z-index: 20 !important; border: 3px solid rgba(255, 0, 0, 0.5) !important; box-shadow: 0 0 6px rgba(255, 0, 0, 0.8) !important; box-sizing: border-box !important; background-color: #404040 !important; color: #d9d9d9 !important; line-height: 15px !important; height: auto !important; max-height: 42px !important; overflow: hidden !important; white-space: normal !important; transition: max-height 0.3s ease !important; }
+            .gallery:hover .nh-caption-cn { max-height: 300px !important; }
+            .nh-cover-dimmed { filter: brightness(0.6) !important; }
+            
+            .btn { padding: 8px 12px; border-radius: 4px; border: none; cursor: pointer; font-size: 14px; font-weight: bold; transition: background-color 0.2s; display: inline-flex; align-items: center; justify-content: center; font-family: inherit; text-align: center; box-sizing: border-box; line-height: normal; height: auto; min-height: 36px; }
+            .btn-primary { background-color: #ed2553 !important; color: #ffffff !important; }
+            .btn-primary:hover { background-color: #f0466d !important; }
+            .btn-secondary { background-color: #34353b !important; color: #ffffff !important; }
+            .btn-secondary:hover { background-color: #42444c !important; }
+            .btn-success { background-color: #4caf50 !important; color: #ffffff !important; border-color: #4caf50 !important; }
+            .btn-success:hover { background-color: #45a049 !important; }
+            .btn:disabled { opacity: 0.6 !important; cursor: not-allowed !important; }
+            
+            .nhqb-modal { background: #222224; color: #e0e0e0; padding: 20px 24px; border-radius: 10px; min-width: 360px; width: 460px; max-width: 95%; box-shadow: 0 12px 48px rgba(0,0,0,0.8); font-size: 14px; border: 1px solid #3c3c3c; box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+            .nhqb-modal h3 { margin-top: 0; color: #fff; border-bottom: 1px solid #3c3c3c; padding-bottom: 12px; margin-bottom: 18px; font-size: 18px; font-weight: 600; }
+            .nhqb-modal .field-group { margin-bottom: 16px; text-align: left; }
+            .nhqb-modal label { font-weight: 600; color: #bbb; display: block; margin-bottom: 6px; font-size: 13px; }
+            .nhqb-modal input[type="text"] { width: 100%; padding: 10px 12px; background: #161618; color: #fff; border: 1px solid #444; border-radius: 6px; outline: none; transition: border-color 0.2s, box-shadow 0.2s; box-sizing: border-box; font-family: inherit; font-size: 14px; }
+            .nhqb-modal input[type="text"]:focus { border-color: #ed2553; box-shadow: 0 0 0 2px rgba(237,37,83,0.25); }
+            .nhqb-modal .divider { margin-bottom: 16px; padding-top: 16px; border-top: 1px solid #3c3c3c; text-align: left; }
+            .nhqb-modal .btn-group { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+        `);
+    }
+    initUI();
 
     /**************************************************************************
-     * 2. 全局状态与配置管理 (Configuration)
+     * 2. 全局状态与配置管理
      **************************************************************************/
 
-    let QB_URL  = localStorage.getItem('qb_url')  || 'http://127.0.0.1:8080';
-    let QB_USER = localStorage.getItem('qb_user') || 'admin';
-    let QB_PASS = localStorage.getItem('qb_pass') || 'adminadmin';
-    let QB_PATH = localStorage.getItem('qb_path') || '/downloads';
-
+    let DL_PATH = localStorage.getItem('nh_dl_path') || 'nHentai';
     const CHECK_KEY = 'nh_qb_checked';
     const DOWNLOADED_KEY = 'nh_qb_downloaded_gids';
     let savedChecked = {};
     let downloadedSet = new Set();
+    let globalFailedItems = [];
 
     function syncLocalState() {
         try { savedChecked = JSON.parse(localStorage.getItem(CHECK_KEY) || '{}'); } catch(e) { savedChecked = {}; }
         try {
             const stored = JSON.parse(localStorage.getItem(DOWNLOADED_KEY) || '[]');
-            if (Array.isArray(stored)) downloadedSet = new Set(stored);
-        } catch (e) { console.error('History load error', e); }
+            if (Array.isArray(stored)) {
+                downloadedSet = new Set(stored.map(String));
+            }
+        } catch (e) {}
 
         let needsUpdate = false;
         for (let gid of Object.keys(savedChecked)) {
@@ -96,193 +101,428 @@
         }
     }
 
-    // 跨标签页同步状态
     window.addEventListener('storage', (e) => {
         if (e.key === DOWNLOADED_KEY || e.key === CHECK_KEY) {
+            syncLocalState();
             requestRender();
         }
     });
 
     /**************************************************************************
-     * 3. 基础工具函数 (Utilities)
+     * 3. 基础工具函数
      **************************************************************************/
 
-    function notify(html, duration = 5000) {
+    function notify(html, duration = Infinity, onReady = null) {
         let container = document.getElementById('nh-qb-container');
         if (!container) { container = document.createElement('div'); container.id = 'nh-qb-container'; document.body.appendChild(container); }
         const el = document.createElement('div'); el.className = 'nh-qb-notify'; el.innerHTML = html; container.appendChild(el);
+        
+        el.innerHTML += `<div style="font-size: 10px; color: #888; margin-top: 10px; text-align: right;">(点击空白处关闭)</div>`;
         requestAnimationFrame(() => el.classList.add('show'));
-        let closing = false; let timer = setTimeout(close, duration);
-        el.addEventListener('mouseenter', () => { clearTimeout(timer); });
-        el.addEventListener('mouseleave', () => { if (!closing) timer = setTimeout(close, duration); });
-        function close() {
-            if (closing) return; closing = true; el.classList.remove('show'); el.style.opacity = '0';
+        
+        let closing = false; let timer = null;
+        function close(e) {
+            if (e && e.target && e.target.tagName === 'BUTTON') return;
+            if (closing) return; closing = true; 
+            if(timer) clearTimeout(timer);
+            el.classList.remove('show'); el.style.opacity = '0';
             setTimeout(() => { try { el.remove(); } catch (e){} if (container.childNodes.length === 0) container.remove(); }, 400);
         }
+
+        el.addEventListener('click', close);
+
+        if (duration !== Infinity && duration > 0) {
+            timer = setTimeout(close, duration);
+            el.addEventListener('mouseenter', () => { clearTimeout(timer); });
+            el.addEventListener('mouseleave', () => { if (!closing) timer = setTimeout(close, duration); });
+        }
+        if (onReady) setTimeout(() => onReady(el), 0);
         return { close };
     }
 
-    function copyToClipboard(text) {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-            navigator.clipboard.writeText(text).then(() => { notify(`<div class='title'>已复制链接</div><div style="word-break:break-all">${escapeHtml(text)}</div>`); });
-        } else {
-            const input = document.createElement('textarea'); input.value = text; document.body.appendChild(input); input.select(); document.execCommand('copy'); document.body.removeChild(input);
-            notify(`<div class='title'>已复制链接</div><div style="word-break:break-all">${escapeHtml(text)}</div>`);
+    function stickyNotify(id, html) {
+        let container = document.getElementById('nh-qb-container');
+        if (!container) { container = document.createElement('div'); container.id = 'nh-qb-container'; document.body.appendChild(container); }
+        let el = document.getElementById(id);
+        if (!el) {
+            el = document.createElement('div'); el.id = id; el.className = 'nh-qb-notify'; 
+            container.appendChild(el); requestAnimationFrame(() => el.classList.add('show'));
         }
+        el.innerHTML = html;
+        return {
+            close: () => { el.classList.remove('show'); el.style.opacity = '0'; setTimeout(() => { try { el.remove(); } catch (e){} }, 400); }
+        };
     }
 
     function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"})[c]); }
     function sanitizeFileName(name) { return name.replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim().substring(0, 150).trim().replace(/[.+\-\s]+$/g, ''); }
 
     /**************************************************************************
-     * 4. qBittorrent 交互逻辑 (API Interaction)
+     * 4. 智能化图片下载引擎 (无弹窗图片预加载探测机制)
      **************************************************************************/
 
-    function loginQB() {
-        return new Promise((resolve, reject) => {
-            GM_xmlhttpRequest({
-                method: 'POST', url: QB_URL.replace(/\/$/, '') + '/api/v2/auth/login',
-                data: `username=${encodeURIComponent(QB_USER)}&password=${encodeURIComponent(QB_PASS)}`,
-                headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-                onload: res => { if (res.responseText === 'Ok.') resolve(true); else reject(new Error('login failed')); },
-                onerror: () => reject(new Error('login error'))
-            });
-        });
+    const CDN_NODES = ['i.nhentai.net', 'i1.nhentai.net', 'i2.nhentai.net', 'i3.nhentai.net', 'i5.nhentai.net', 'i7.nhentai.net'];
+
+    async function fetchGalleryMeta(gid, htmlString = null) {
+        let mediaId = null;
+        let numPages = null;
+        let imgHost = 'i.nhentai.net';
+        let extMap = [];
+
+        let html = htmlString;
+        if (!html) {
+            let res = await fetch(`https://nhentai.net/g/${gid}/`);
+            if (res.status === 429) throw new Error('429');
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            html = await res.text();
+        }
+
+        let mediaIdMatch = html.match(/"media_id":\s*"?(\d+)"?/) || html.match(/\/galleries\/(\d+)\//);
+        if (mediaIdMatch) mediaId = mediaIdMatch[1];
+
+        let numPagesMatch = html.match(/"num_pages":\s*(\d+)/);
+        if (numPagesMatch) numPages = parseInt(numPagesMatch[1], 10);
+        if (!numPages) {
+            let pm = html.match(/pages%3A(\d+)/) || html.match(/Pages:[\s\S]*?<span class="name">(\d+)<\/span>/);
+            if (pm) numPages = parseInt(pm[1], 10);
+        }
+
+        let coverMatch = html.match(/(https:\/\/(t\d+)\.nhentai\.net\/galleries\/\d+\/cover\.(jpg|png|gif|webp))/);
+        if (coverMatch) {
+            imgHost = coverMatch[2].replace('t', 'i') + '.nhentai.net';
+        } else if (html.match(/t(\d+)\.nhentai\.net/)) {
+            let tMatch = html.match(/t(\d+)\.nhentai\.net/);
+            imgHost = `i${tMatch[1]}.nhentai.net`;
+        }
+
+        let pagesBlockMatch = html.match(/"pages":\s*\[(.*?)\]/);
+        if (pagesBlockMatch) {
+            let tMatches = [...pagesBlockMatch[1].matchAll(/"t":"([jpgw])"/g)];
+            if (tMatches.length > 0) {
+                const typeMap = { 'j': 'jpg', 'p': 'png', 'g': 'gif', 'w': 'webp' };
+                extMap = tMatches.map(m => typeMap[m[1]]);
+            }
+        }
+
+        if (!mediaId || !numPages) {
+            throw new Error(`元数据提取失败 (未能从页面匹配到媒体 ID 或页数)`);
+        }
+
+        return { mediaId, numPages, imgHost, extMap };
     }
 
-    function pushTorrentPromise(gid, title) {
-        return new Promise(async (resolve) => {
-            const torrentUrl = `https://nhentai.net/g/${gid}/download`;
+    // ★核心机制变更：使用浏览器原生 Image 对象加载探测，彻底告别油猴跨域弹窗
+    async function sniffExtensionFast(baseHost, mediaId, p) {
+        let extsToTry = ['webp', 'jpg', 'png'];
+        for (let ext of extsToTry) {
+            let ok = await new Promise(resolve => {
+                let img = new Image();
+                let timer = setTimeout(() => {
+                    img.src = ''; 
+                    resolve(false);
+                }, 3000); // 3秒超时防止死链卡住
+                
+                img.onload = () => {
+                    clearTimeout(timer);
+                    resolve(true);
+                };
+                img.onerror = () => {
+                    clearTimeout(timer);
+                    resolve(false);
+                };
+                img.src = `https://${baseHost}/galleries/${mediaId}/${p}.${ext}`;
+            });
+            if (ok) return ext;
+        }
+        return 'jpg'; 
+    }
 
-            try {
-                const tRes = await fetch(torrentUrl, {
-                    method: 'GET',
-                    headers: { 'Accept': 'application/x-bittorrent, application/octet-stream, */*' }
-                });
+    async function processGalleryImages(gid, title, meta, onProgress) {
+        const { mediaId, numPages, imgHost, extMap } = meta;
+        let cleanTitle = sanitizeFileName(title);
+        let baseDir = DL_PATH ? `${DL_PATH}/${cleanTitle}/${gid}` : `${cleanTitle}/${gid}`;
 
-                if (!tRes.ok) {
-                    return resolve({ ok:false, gid, title, error: `获取种子失败: HTTP ${tRes.status} (可能种子未生成)` });
+        let success = 0; let failed = 0;
+        let concurrency = 5; let i = 1;
+
+        return new Promise((resolve) => {
+            let active = 0;
+
+            function next() {
+                while (active < concurrency && i <= numPages) {
+                    let p = i++; active++;
+                    
+                    (async () => {
+                        let pathBase = `${baseDir}/${p}`;
+                        let knownExt = (extMap && extMap.length >= p) ? extMap[p - 1] : null;
+
+                        // 如果没拿到官方后缀映射，启动图片隐式预加载嗅探
+                        if (!knownExt) {
+                            knownExt = await sniffExtensionFast(imgHost, mediaId, p);
+                        }
+
+                        let hostsToTry = [imgHost, ...CDN_NODES.filter(h => h !== imgHost)];
+                        let maxAttempts = Math.min(3, hostsToTry.length);
+                        let isOk = false;
+
+                        for (let idx = 0; idx < maxAttempts; idx++) {
+                            let url = `https://${hostsToTry[idx]}/galleries/${mediaId}/${p}.${knownExt}`;
+                            let path = `${pathBase}.${knownExt}`;
+                            
+                            isOk = await new Promise((res) => {
+                                GM_download({
+                                    url: url, name: path, saveAs: false,
+                                    onload: () => res(true), onerror: () => res(false), ontimeout: () => res(false)
+                                });
+                            });
+
+                            if (isOk) break;
+                            await new Promise(r => setTimeout(r, 600)); // 换节点前休眠
+                        }
+
+                        if (isOk) success++; else failed++;
+                        active--;
+                        
+                        if (onProgress) onProgress(success, failed, numPages);
+                        
+                        if (success + failed === numPages) {
+                            resolve({ ok: success > 0, gid, title, success, failed, numPages });
+                        } else {
+                            next();
+                        }
+                    })();
                 }
-
-                const blob = await tRes.blob();
-
-                if (blob.type.includes('text/html')) {
-                    return resolve({ ok:false, gid, title, error: `下载被 Cloudflare 盾拦截` });
-                }
-
-                const cleanTitle = sanitizeFileName(title);
-                const finalPath = QB_PATH.replace(/\/$/, '') + '/' + cleanTitle + '/' + gid;
-                const fd = new FormData();
-                fd.append('torrents', blob, `${gid}.torrent`);
-                fd.append('rename', cleanTitle);
-                fd.append('savepath', finalPath);
-                fd.append('root_folder', 'true');
-
-                GM_xmlhttpRequest({
-                    method: 'POST',
-                    url: QB_URL.replace(/\/$/, '') + '/api/v2/torrents/add',
-                    data: fd,
-                    onload: upRes => {
-                        if (upRes.status >= 200 && upRes.status < 300 || upRes.responseText.includes('Ok.')) resolve({ ok:true, gid, title });
-                        else resolve({ ok:false, gid, title, error: `推送到qB失败: ${upRes.status}` });
-                    },
-                    onerror: () => resolve({ ok:false, gid, title, error: 'qB接口网络报错 (请检查qB配置或网络通信)' })
-                });
-
-            } catch (err) {
-                return resolve({ ok:false, gid, title, error: `网络请求失败: ${err.message}` });
             }
+            next();
         });
     }
 
     /**************************************************************************
-     * 5. 详情页功能 (Single Page Logic)
+     * 5. 详情页功能
      **************************************************************************/
 
     function addSinglePageButton() {
-        const downloadAnchor = document.querySelector("a[href*='/download']");
-        if (!downloadAnchor) return;
+        const downloadWrapper = document.querySelector("#download-wrapper");
+        if (!downloadWrapper) return;
 
-        const currentGid = location.pathname.split('/')[2];
+        const currentGid = String(location.pathname.split('/')[2]);
         const isDownloaded = downloadedSet.has(currentGid);
 
-        let btn = downloadAnchor.parentNode.querySelector('.nh-custom-btn-single');
+        let btn = downloadWrapper.parentNode.querySelector('.nh-custom-btn-single');
 
-        if (downloadAnchor.getAttribute('data-nh-gid') === currentGid) {
+        if (downloadWrapper.getAttribute('data-nh-gid') === currentGid) {
             if (btn) {
                 if (isDownloaded) {
-                    btn.innerText = '已下载 (再次推送)';
-                    btn.style.backgroundColor = '#4caf50'; btn.style.borderColor = '#4caf50';
+                    btn.innerText = '已下载'; btn.classList.add('btn-success'); btn.classList.remove('btn-primary');
                 } else {
-                    btn.innerText = '推送到 qBittorrent';
-                    btn.style.backgroundColor = ''; btn.style.borderColor = '';
+                    btn.innerText = '提取原图下载'; btn.classList.add('btn-primary'); btn.classList.remove('btn-success');
                 }
             }
             return;
         }
 
         if (btn) btn.remove();
-        downloadAnchor.setAttribute('data-nh-gid', currentGid);
+        downloadWrapper.setAttribute('data-nh-gid', currentGid);
 
         btn = document.createElement('button');
-        btn.className = 'btn btn-primary nh-custom-btn-single';
-        if (isDownloaded) {
-            btn.innerText = '已下载 (再次推送)';
-            btn.style.backgroundColor = '#4caf50'; btn.style.borderColor = '#4caf50';
-        } else { btn.innerText = '推送到 qBittorrent'; }
-
-        downloadAnchor.parentNode.appendChild(btn);
+        btn.className = 'btn nh-custom-btn-single ' + (isDownloaded ? 'btn-success' : 'btn-primary');
+        btn.innerText = isDownloaded ? '已下载' : '提取原图下载';
+        downloadWrapper.parentNode.appendChild(btn);
 
         btn.addEventListener('click', async () => {
-            const gid = location.pathname.split('/')[2];
+            const gid = String(location.pathname.split('/')[2]);
             const title = document.querySelector('#info h2')?.innerText?.trim() || document.querySelector('#info h1')?.innerText?.trim() || gid;
-            let loginToast;
-            try { loginToast = notify(`<div class='title'>正在登录 qBittorrent…</div>`); await loginQB(); loginToast.close(); }
-            catch (e) { if (loginToast) loginToast.close(); notify(`<div class='title'>登录失败</div>无法登录 qBittorrent，请检查设置。`, 6000); return; }
+            
+            let meta;
+            try { meta = await fetchGalleryMeta(gid, document.documentElement.innerHTML); } 
+            catch(e) { notify(`<div class='title'>错误</div>${e.message}`, Infinity); return; }
 
-            const startToast = notify(`<div class='title'>开始推送</div>正在下载并推送：${gid} - ${escapeHtml(title)}`);
-            const res = await pushTorrentPromise(gid, title);
-            startToast.close();
+            let progToast = stickyNotify('nh-single-progress', `<div class='title'>开始获取高清图片...</div>共 ${meta.numPages} 页，请稍候`);
 
-            if (res.ok) {
-                notify(`<div class='title'>推送成功</div>成功：1/1`);
-                downloadedSet.add(gid); localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
+            const result = await processGalleryImages(gid, title, meta, (s, f, t) => {
+                progToast = stickyNotify('nh-single-progress', `
+                    <div class='title'>正在高速下载原图...</div>
+                    <div style="color:#4caf50;font-size:14px;margin-bottom:4px;">进度: ${s + f} / ${t} (成功: ${s} | 失败: ${f})</div>
+                    <div style="font-size:11px;color:#ccc;word-break:break-all;">${escapeHtml(title)}</div>
+                `);
+            });
+
+            progToast.close();
+
+            if (result.ok) {
+                notify(`<div class='title' style="font-size:15px; color:#4caf50;">✓ 本子下载完成</div>成功下载 ${result.success} 张，失败 <span style="color:${result.failed > 0 ? '#ff8b8b' : '#fff'}">${result.failed}</span> 张`, Infinity);
+                downloadedSet.add(gid); 
+                localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
+                syncLocalState();
                 requestRender();
             } else {
-                notify(`<div class='title'>推送完成（有失败）</div>成功：0/1<br><span class='error'>失败：${res.gid} - ${escapeHtml(res.title)}</span><br><span style="color:#ffc107;font-size:12px;">原因：${res.error}</span>` , 10000);
+                notify(`<div class='title'>下载失败</div>未能成功下载任何图片，可能是原图跨域被拦截。` , Infinity);
             }
         });
     }
 
     /**************************************************************************
-     * 6. 列表页功能 (Batch Mode Logic)
+     * 6. 列表页批量功能 & 总结报告重试机制
      **************************************************************************/
+    
+    function updateRetryButton() {
+        let retryBtn = document.getElementById('nhqb_retry_btn');
+        if (globalFailedItems.length > 0) {
+            if (!retryBtn) {
+                retryBtn = document.createElement('button');
+                retryBtn.id = 'nhqb_retry_btn';
+                retryBtn.className = 'btn';
+                retryBtn.style.cssText = 'position:fixed;bottom:65px;right:80px;z-index:99999;background-color:#ff9800!important;color:#fff!important;border:none;box-shadow: 0 4px 12px rgba(255,152,0,0.4);';
+                document.body.appendChild(retryBtn);
 
-    function addBatchFeature() {
-        const HISTORY_KEY = 'nh_qb_push_history_v2';
-        const OLD_KEY = 'nh_qb_pushed_max_gid';
-        const getBjTime = () => new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
-        let pushHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || '{"max":{"id":0,"time":"--"},"prev":{"id":0,"time":"--"}}');
-        const oldSimpleVal = parseInt(localStorage.getItem(OLD_KEY) || '0');
-        if (oldSimpleVal > pushHistory.max.id) { pushHistory.max.id = oldSimpleVal; pushHistory.max.time = '旧记录'; }
+                retryBtn.addEventListener('click', async () => {
+                    const itemsToRetry = [...globalFailedItems];
+                    globalFailedItems = []; updateRetryButton(); 
+                    let { successList, failedList } = await executeBatchDownload(itemsToRetry, "正在重试失败项");
+                    handleBatchResult(successList, failedList, itemsToRetry.length);
+                });
+            }
+            retryBtn.style.display = 'inline-flex';
+            retryBtn.innerText = `一键重试失败项 (${globalFailedItems.length}本)`;
+        } else {
+            if (retryBtn) retryBtn.style.display = 'none';
+        }
+    }
 
-        const renderGidInfo = (data) => {
-            const linkStyle = 'color:#ed2553;font-weight:bold;font-size:14px;margin:0 4px;text-decoration:none;border-bottom:1px dashed #ed2553;';
-            const timeStyle = 'color:#888;font-size:11px;font-family:monospace;min-width:110px;text-align:right;display:inline-block;';
-            const rowStyle = 'display:flex;align-items:center;justify-content:flex-end;width:100%;margin-bottom:2px;';
-            return `<div style="${rowStyle}"><span>已推送最大 GID:</span><a href="/g/${data.max.id}/" target="_blank" style="${linkStyle}">${data.max.id}</a><span style="${timeStyle}">[${data.max.time}]</span></div>` +
-                   `<div style="${rowStyle}"><span style="color:#aaa;">上次推送最大 GID:</span><a href="/g/${data.prev.id}/" target="_blank" style="${linkStyle}">${data.prev.id}</a><span style="${timeStyle}">[${data.prev.time}]</span></div>`;
-        };
+    async function executeBatchDownload(itemsToDownload, initTitleText = "准备队列中...") {
+        const total = itemsToDownload.length;
+        let progToast = stickyNotify('nh-batch-progress', `<div class='title'>${initTitleText}</div>共计 ${total} 本`);
+        const successList = []; const failedList = [];
 
-        if (!document.getElementById('nh-max-gid-display')) {
-            const maxIdInfo = document.createElement('div');
-            maxIdInfo.id = 'nh-max-gid-display';
-            maxIdInfo.style.cssText = 'position:fixed;bottom:80px;right:10px;z-index:99990;background:rgba(0,0,0,0.9);padding:8px 12px;border-radius:4px;color:#ccc;font-size:12px;pointer-events:auto;text-align:right;box-shadow:0 2px 8px rgba(0,0,0,0.5);display:flex;flex-direction:column;align-items:flex-end;';
-            maxIdInfo.innerHTML = renderGidInfo(pushHistory);
-            document.body.appendChild(maxIdInfo);
+        for (let i = 0; i < total; i++) {
+            const { gid, title } = itemsToDownload[i];
+
+            progToast = stickyNotify('nh-batch-progress', `
+                <div class='title'>正在解析数据... (${i+1}/${total})</div>
+                <div style="font-size:11px;color:#ccc;word-break:break-all;">${escapeHtml(title)}</div>
+            `);
+
+            let meta;
+            try { meta = await fetchGalleryMeta(gid); } 
+            catch (e) {
+                if (e.message === '429') {
+                    progToast = stickyNotify('nh-batch-progress', `<div class='title'>访问频繁，休眠 10 秒后重试...</div>`);
+                    await new Promise(r => setTimeout(r, 10000));
+                    try { meta = await fetchGalleryMeta(gid); } 
+                    catch(err) { failedList.push({gid, title, error: "被服务器 429 拦截拒绝响应"}); continue; }
+                } else { failedList.push({gid, title, error: e.message}); continue; }
+            }
+
+            if (!meta) { failedList.push({gid, title, error: "元数据提取失败"}); continue; }
+
+            let result = await processGalleryImages(gid, title, meta, (s, f, t) => {
+                progToast = stickyNotify('nh-batch-progress', `
+                    <div class='title'>正在批量下载 (${i+1}/${total})</div>
+                    <div style="color:#4caf50;font-size:14px;margin-bottom:4px;">单本进度: ${s + f} / ${t} (成功 ${s})</div>
+                    <div style="font-size:11px;color:#ccc;word-break:break-all;">${escapeHtml(title)}</div>
+                `);
+            });
+
+            if (result.ok) {
+                successList.push(result);
+                downloadedSet.add(String(gid));
+                delete savedChecked[gid];
+                const inputCb = document.querySelector(`input[data-gid="${gid}"]`);
+                if (inputCb) inputCb.checked = false;
+                
+                localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+                localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
+                syncLocalState();
+                requestRender();
+            } else {
+                failedList.push({gid, title, error: "全页下载失败或超时"});
+            }
+
+            if (i < total - 1) await new Promise(r => setTimeout(r, 1200));
+        }
+        progToast.close();
+        return { successList, failedList };
+    }
+
+    function handleBatchResult(successList, failedList, total) {
+        if (successList.length > 0) {
+            const HISTORY_KEY = 'nh_qb_push_history_v2';
+            const OLD_KEY = 'nh_qb_pushed_max_gid';
+            const getBjTime = () => new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+            let pushHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || '{"max":{"id":0,"time":"--"},"prev":{"id":0,"time":"--"}}');
+            
+            const currentBatchGids = successList.map(r => parseInt(r.gid));
+            const currentBatchMax = Math.max(...currentBatchGids);
+            if (currentBatchMax > pushHistory.max.id) {
+                pushHistory.prev.id = pushHistory.max.id; pushHistory.prev.time = pushHistory.max.time;
+                pushHistory.max.id = currentBatchMax; pushHistory.max.time = getBjTime();
+                localStorage.setItem(HISTORY_KEY, JSON.stringify(pushHistory)); localStorage.setItem(OLD_KEY, currentBatchMax);
+                
+                const renderGidInfo = (data) => {
+                    const linkStyle = 'color:#ed2553;font-weight:bold;font-size:14px;margin:0 4px;text-decoration:none;border-bottom:1px dashed #ed2553;';
+                    const timeStyle = 'color:#888;font-size:11px;font-family:monospace;min-width:110px;text-align:right;display:inline-block;';
+                    const rowStyle = 'display:flex;align-items:center;justify-content:flex-end;width:100%;margin-bottom:2px;';
+                    return `<div style="${rowStyle}"><span>已下载最大 GID:</span><a href="/g/${data.max.id}/" target="_blank" style="${linkStyle}">${data.max.id}</a><span style="${timeStyle}">[${data.max.time}]</span></div>` +
+                           `<div style="${rowStyle}"><span style="color:#aaa;">上次下载最大 GID:</span><a href="/g/${data.prev.id}/" target="_blank" style="${linkStyle}">${data.prev.id}</a><span style="${timeStyle}">[${data.prev.time}]</span></div>`;
+                };
+                const infoEl = document.getElementById('nh-max-gid-display');
+                if(infoEl) infoEl.innerHTML = renderGidInfo(pushHistory);
+            }
         }
 
-        // ================= 新增：左下角全选/取消全选 面板 =================
+        globalFailedItems = failedList;
+        updateRetryButton();
+
+        let failedHtml = '';
+        if (failedList.length > 0) {
+            failedHtml = `
+                <div class="line" style="border-top:1px solid #444; padding-top:10px; margin-top:10px;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+                        <strong style="color:#ff9800; font-size:14px;">⚠️ 失败列表 (${failedList.length} 本)</strong>
+                    </div>
+                    <div class="nh-qb-notify-scroll">
+                        ${failedList.map(f => `
+                            <div style="background:rgba(255,255,255,0.05); padding:6px; border-radius:4px; margin-bottom:6px;">
+                                <div style="color:#ed2553; font-weight:bold; font-size:12px;">ID: ${f.gid}</div>
+                                <div style="color:#ddd; margin:2px 0;">${escapeHtml(f.title)}</div>
+                                <div style="color:#ffc107;">原因：${escapeHtml(f.error)}</div>
+                            </div>
+                        `).join('')}
+                    </div>
+                    <button class="btn retry-inline-btn" style="width:100%; margin-top:12px; background-color:#ff9800!important; color:#fff!important; border:none; padding:8px 0; font-size:13px; box-shadow:0 2px 8px rgba(255,152,0,0.3);">
+                        🔄 快速补充重试 (${failedList.length} 本)
+                    </button>
+                </div>
+            `;
+        }
+        
+        let titleColor = failedList.length === 0 ? '#4caf50' : '#ed2553';
+        let summaryHtml = `
+            <div class='title' style="font-size:16px; color:${titleColor};">📋 批量任务报告</div>
+            <div style="font-size:14px; margin-top:8px;">
+                成功下载：<span style="color:#4caf50; font-weight:bold; font-size:16px;">${successList.length}</span> / ${total}
+            </div>
+            ${failedHtml}
+        `;
+
+        notify(summaryHtml, Infinity, (el) => {
+            const retryInlineBtn = el.querySelector('.retry-inline-btn');
+            if (retryInlineBtn) {
+                retryInlineBtn.addEventListener('click', (e) => {
+                    e.stopPropagation(); e.preventDefault();
+                    el.style.opacity = '0'; setTimeout(() => el.remove(), 400);
+
+                    const itemsToRetry = [...globalFailedItems];
+                    globalFailedItems = []; updateRetryButton(); 
+                    executeBatchDownload(itemsToRetry, "正在重试失败项").then(({ successList: sList, failedList: fList }) => {
+                        handleBatchResult(sList, fList, itemsToRetry.length);
+                    });
+                });
+            }
+        });
+    }
+
+    function addBatchFeature() {
         if (!document.getElementById('nhqb_left_panel')) {
             const leftPanel = document.createElement('div');
             leftPanel.id = 'nhqb_left_panel';
@@ -293,117 +533,61 @@
             `;
             document.body.appendChild(leftPanel);
 
-            // 绑定全选事件
             document.getElementById('nhqb_select_cn').addEventListener('click', () => {
                 let count = 0;
                 document.querySelectorAll('.gallery').forEach(thumb => {
                     const cb = thumb.querySelector('input[type="checkbox"]');
                     if (!cb) return;
-
-                    const gid = cb.dataset.gid;
+                    const gid = String(cb.dataset.gid);
                     const title = cb.dataset.title || '';
                     const isDownloaded = downloadedSet.has(gid);
                     const isChinese = thumb.classList.contains('lang-cn') || title.includes('[Chinese]') || title.includes('汉化');
-
-                    // 只选中未被下载且是中文的本子
-                    if (isChinese && !isDownloaded && !cb.checked) {
-                        cb.checked = true;
-                        savedChecked[gid] = title;
-                        count++;
-                    }
+                    if (isChinese && !isDownloaded && !cb.checked) { cb.checked = true; savedChecked[gid] = title; count++; }
                 });
                 localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
-                if (count > 0) notify(`<div class='title'>全选完成</div>已自动选中本页 ${count} 个未下载的中文本子`);
-                else notify(`<div class='title'>全选提示</div>当前页面没有找到需要勾选的中文本子`);
+                if (count > 0) notify(`<div class='title'>全选完成</div>已自动选中本页 ${count} 个未下载的中文本子`, 5000);
+                else notify(`<div class='title'>全选提示</div>当前页面没有找到需要勾选的中文本子`, 5000);
             });
 
-            // 绑定取消全选事件
             document.getElementById('nhqb_deselect_all').addEventListener('click', () => {
                 let count = 0;
                 document.querySelectorAll('.gallery').forEach(thumb => {
                     const cb = thumb.querySelector('input[type="checkbox"]');
                     if (!cb) return;
-
-                    const gid = cb.dataset.gid;
-                    if (cb.checked) {
-                        cb.checked = false;
-                        delete savedChecked[gid];
-                        count++;
-                    }
+                    const gid = String(cb.dataset.gid);
+                    if (cb.checked) { cb.checked = false; delete savedChecked[gid]; count++; }
                 });
                 localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
-                if (count > 0) notify(`<div class='title'>取消选中</div>已清空本页 ${count} 个选中状态`);
+                if (count > 0) notify(`<div class='title'>取消选中</div>已清空本页 ${count} 个选中状态`, 5000);
             });
         }
-        // =================================================================
 
         if (!document.getElementById('nhqb_batch_btn')) {
             const batchBtn = document.createElement('button');
             batchBtn.id = 'nhqb_batch_btn';
             batchBtn.className = 'btn btn-primary';
-            batchBtn.innerText = '批量推送到 qBittorrent';
+            batchBtn.innerText = '批量下载到本地';
             batchBtn.style.cssText = 'position:fixed;bottom:20px;right:80px;z-index:99999;';
             document.body.appendChild(batchBtn);
 
             batchBtn.addEventListener('click', async () => {
                 const allChecked = Array.from(document.querySelectorAll("input[type=checkbox][data-gid]:checked"));
-                if (!allChecked.length) { notify(`<div class='title'>提示</div>请先勾选要推送的本子！`); return; }
+                if (!allChecked.length) { notify(`<div class='title'>提示</div>请先勾选要下载的本子！`, 4000); return; }
 
                 const checked = allChecked.filter(cb => {
-                    const isDownloaded = downloadedSet.has(cb.dataset.gid);
+                    const isDownloaded = downloadedSet.has(String(cb.dataset.gid));
                     if (isDownloaded) { cb.checked = false; delete savedChecked[cb.dataset.gid]; }
                     return !isDownloaded;
                 });
 
-                const skippedCount = allChecked.length - checked.length;
-                if (skippedCount > 0) notify(`<div class='title'>自动去重</div>已自动跳过 ${skippedCount} 个已下载的任务`, 4000);
                 if (checked.length === 0) {
                     localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
                     return;
                 }
 
-                let loginToast;
-                try { loginToast = notify(`<div class='title'>正在登录 qBittorrent…</div>`); await loginQB(); loginToast.close(); }
-                catch (e) { if (loginToast) loginToast.close(); notify(`<div class='title'>登录失败</div>无法登录 qBittorrent，请检查设置。`, 6000); return; }
-
-                const total = checked.length;
-                const progressNotify = notify(`<div class='title'>开始推送</div>已推送：0/${total}` , 20000);
-
-                const results = await Promise.all(checked.map(cb => {
-                    const gid = cb.dataset.gid; const title = cb.dataset.title;
-                    return pushTorrentPromise(gid, title);
-                }));
-
-                const successItems = results.filter(r => r.ok);
-                if (successItems.length > 0) {
-                    successItems.forEach(item => {
-                        downloadedSet.add(item.gid);
-                        delete savedChecked[item.gid];
-                        const cb = document.querySelector(`input[data-gid="${item.gid}"]`);
-                        if (cb) cb.checked = false;
-                    });
-
-                    localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
-                    localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
-
-                    const currentBatchGids = successItems.map(r => parseInt(r.gid));
-                    const currentBatchMax = Math.max(...currentBatchGids);
-                    if (currentBatchMax > pushHistory.max.id) {
-                        pushHistory.prev.id = pushHistory.max.id; pushHistory.prev.time = pushHistory.max.time;
-                        pushHistory.max.id = currentBatchMax; pushHistory.max.time = getBjTime();
-                        localStorage.setItem(HISTORY_KEY, JSON.stringify(pushHistory)); localStorage.setItem(OLD_KEY, currentBatchMax);
-                        const infoEl = document.getElementById('nh-max-gid-display');
-                        if(infoEl) infoEl.innerHTML = renderGidInfo(pushHistory);
-                    }
-                    requestRender();
-                }
-
-                const successCount = successItems.length;
-                const failed = results.filter(r => !r.ok);
-                let failedHtml = failed.length ? '<div class="line"><strong>失败列表：</strong>' + failed.map(f => `<div class="error" style="margin-bottom:6px">${f.gid} - ${escapeHtml(f.title)}<br><span style="color:#ffc107;font-size:11px;">[${escapeHtml(f.error)}]</span></div>`).join('') + '</div>' : '';
-
-                progressNotify.close();
-                notify(`<div class='title'>推送完成</div>成功：${successCount}/${total}` + failedHtml, 8000 + failed.length*2000);
+                const itemsToDownload = checked.map(cb => ({gid: String(cb.dataset.gid), title: cb.dataset.title}));
+                let { successList, failedList } = await executeBatchDownload(itemsToDownload);
+                handleBatchResult(successList, failedList, itemsToDownload.length);
             });
         }
 
@@ -421,8 +605,8 @@
             const a = thumb.querySelector('a'); if (!a) return;
             const href = a.href || '';
             const m = href.match(/\/g\/(\d+)\//) || href.match(/\/g\/(\d+)$/);
-            const gid = m ? m[1] : (href.split('/g/')[1] ? href.split('/g/')[1].split('/')[0] : null);
-            if (!gid) return;
+            const gid = String(m ? m[1] : (href.split('/g/')[1] ? href.split('/g/')[1].split('/')[0] : null));
+            if (!gid || gid === "null") return;
 
             const isDownloaded = downloadedSet.has(gid);
 
@@ -433,7 +617,7 @@
                     if (!tag) {
                         tag = document.createElement('div');
                         tag.className = 'downloaded-tag nh-custom-injected';
-                        tag.style.cssText = 'position:absolute;top:0;left:0;background:#4caf50;color:#fff;font-size:12px;padding:2px 6px;z-index:25;border-bottom-right-radius:4px;font-weight:bold;box-shadow:2px 2px 4px rgba(0,0,0,0.5);';
+                        tag.style.cssText = 'position:absolute;top:0;left:0;background:#4caf50;color:#fff;font-size:12px;padding:2px 6px;z-index:25;border-bottom-right-radius:4px;font-weight:bold;box-shadow:2px 2px 4px rgba(0,0,0,0.5);pointer-events:none;';
                         tag.innerText = '已下载'; thumb.appendChild(tag);
                     }
                     if (cover) cover.classList.add('nh-cover-dimmed');
@@ -478,7 +662,7 @@
             if (isDownloaded) {
                 const tag = document.createElement('div');
                 tag.className = 'downloaded-tag nh-custom-injected';
-                tag.style.cssText = 'position:absolute;top:0;left:0;background:#4caf50;color:#fff;font-size:12px;padding:2px 6px;z-index:25;border-bottom-right-radius:4px;font-weight:bold;box-shadow:2px 2px 4px rgba(0,0,0,0.5);';
+                tag.style.cssText = 'position:absolute;top:0;left:0;background:#4caf50;color:#fff;font-size:12px;padding:2px 6px;z-index:25;border-bottom-right-radius:4px;font-weight:bold;box-shadow:2px 2px 4px rgba(0,0,0,0.5);pointer-events:none;';
                 tag.innerText = '已下载'; thumb.appendChild(tag);
                 if(cover) cover.classList.add('nh-cover-dimmed');
             } else {
@@ -503,15 +687,18 @@
         const modal = document.createElement('div');
         modal.className = 'nhqb-modal';
         modal.innerHTML = `
-            <h3>qBittorrent 配置</h3>
-            <div class="field-group"><label>地址：</label><input type="text" id="nhq_addr" value="${escapeHtml(QB_URL)}"></div>
-            <div class="field-group"><label>下载根目录：</label><input type="text" id="nhq_path" value="${escapeHtml(QB_PATH)}" placeholder="/downloads"></div>
-            <div class="field-group"><label>用户名：</label><input type="text" id="nhq_user" value="${escapeHtml(QB_USER)}"></div>
-            <div class="field-group"><label>密码：</label><input type="password" id="nhq_pass" value="${escapeHtml(QB_PASS)}"></div>
+            <h3>原图直刮下载配置</h3>
+            
+            <div class="field-group">
+                <label>下载根目录名 (将在浏览器默认下载路径下建立此文件夹):</label>
+                <input type="text" id="nhq_path" value="${escapeHtml(DL_PATH)}" placeholder="例如填入 nHentai">
+                <div class="nhqb-helper">
+                    脚本会自动按照 <b>【根目录】/【本子名】/【GID】/【页码.后缀】</b> 的格式为您建好文件夹并归类保存。
+                </div>
+            </div>
             
             <div class="divider">
                 <label>历史记录管理：</label>
-                <button id="nhq_sync" class="btn btn-secondary" style="margin-top:6px;width:100%;">🔄 从 qBittorrent 同步已下载记录</button>
                 <div style="display:flex; gap:10px; margin-top:10px;">
                     <button id="nhq_backup" class="btn btn-secondary" style="flex:1;">⬇️ 备份记录到本地</button>
                     <button id="nhq_restore_btn" class="btn btn-secondary" style="flex:1;">⬆️ 从文件恢复记录</button>
@@ -520,7 +707,6 @@
             </div>
 
             <div class="btn-group">
-                <button id="nhq_test" class="btn btn-secondary">测试连接</button>
                 <button id="nhq_cancel" class="btn btn-secondary">取消</button>
                 <button id="nhq_save" class="btn btn-primary">保存</button>
             </div>
@@ -532,7 +718,7 @@
             const data = localStorage.getItem(DOWNLOADED_KEY) || '[]'; const blob = new Blob([data], { type: 'application/json' }); const url = URL.createObjectURL(blob);
             const a = document.createElement('a'); const dateStr = new Date().toISOString().slice(0,10).replace(/-/g, "");
             a.download = `nh_downloaded_history_${dateStr}.json`; a.href = url; a.click(); URL.revokeObjectURL(url);
-            notify(`<div class='title'>备份已下载</div>已保存到本地磁盘`);
+            notify(`<div class='title'>备份已下载</div>已保存到本地磁盘`, 5000);
         });
 
         modal.querySelector('#nhq_restore_btn').addEventListener('click', () => { modal.querySelector('#nhq_restore_input').click(); });
@@ -546,55 +732,24 @@
                     let addedCount = 0;
                     importedData.forEach(gid => { if (!downloadedSet.has(String(gid))) { downloadedSet.add(String(gid)); addedCount++; } });
                     localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
-                    notify(`<div class='title'>恢复成功</div>成功导入 ${addedCount} 条新记录<br>当前总记录：${downloadedSet.size}`);
-                    requestRender();
+                    notify(`<div class='title'>恢复成功</div>成功导入 ${addedCount} 条新记录<br>当前总记录：${downloadedSet.size}`, 5000);
+                    syncLocalState(); requestRender();
                 } catch (err) { console.error(err); notify(`<div class='title'>导入失败</div>文件格式错误或已损坏`, 4000); }
             };
             reader.readAsText(file);
         });
 
-        modal.querySelector('#nhq_sync').addEventListener('click', async () => {
-            const btn = modal.querySelector('#nhq_sync'); const originalText = btn.innerText; btn.innerText = '正在获取数据 (可能需要几秒)...'; btn.disabled = true;
-            try {
-                await loginQB();
-                GM_xmlhttpRequest({
-                    method: 'GET', url: QB_URL.replace(/\/$/, '') + '/api/v2/torrents/info',
-                    onload: function(response) {
-                        try {
-                            const torrents = JSON.parse(response.responseText); let newCount = 0;
-                            torrents.forEach(t => {
-                                const parts = t.save_path.split(/[/\\]/); const folderName = parts[parts.length - 1];
-                                if (/^\d+$/.test(folderName) && !downloadedSet.has(folderName)) { downloadedSet.add(folderName); newCount++; }
-                            });
-                            localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
-                            notify(`<div class='title'>同步成功</div>新增记录：${newCount} 条<br>当前总记录：${downloadedSet.size} 条`);
-                            requestRender();
-                        } catch (e) { notify(`<div class='title'>解析失败</div>数据格式错误或 qB 响应异常`, 5000); console.error(e); }
-                        finally { btn.innerText = originalText; btn.disabled = false; }
-                    },
-                    onerror: function() { notify(`<div class='title'>同步失败</div>网络请求错误`, 5000); btn.innerText = originalText; btn.disabled = false; }
-                });
-            } catch (e) { notify(`<div class='title'>同步失败</div>无法连接 qBittorrent`, 5000); btn.innerText = originalText; btn.disabled = false; }
-        });
-
         modal.querySelector('#nhq_cancel').addEventListener('click', () => overlay.remove());
 
         modal.querySelector('#nhq_save').addEventListener('click', () => {
-            QB_URL = modal.querySelector('#nhq_addr').value.trim(); QB_PATH = modal.querySelector('#nhq_path').value.trim(); QB_USER = modal.querySelector('#nhq_user').value.trim(); QB_PASS = modal.querySelector('#nhq_pass').value;
-            localStorage.setItem('qb_url', QB_URL); localStorage.setItem('qb_path', QB_PATH); localStorage.setItem('qb_user', QB_USER); localStorage.setItem('qb_pass', QB_PASS);
-            notify(`<div class='title'>配置已保存</div>`); overlay.remove();
-        });
-
-        modal.querySelector('#nhq_test').addEventListener('click', async () => {
-            QB_URL = modal.querySelector('#nhq_addr').value.trim(); QB_USER = modal.querySelector('#nhq_user').value.trim(); QB_PASS = modal.querySelector('#nhq_pass').value;
-            const t = notify(`<div class='title'>正在测试连接…</div>`);
-            try { await loginQB(); t.close(); notify(`<div class='title'>连接成功</div>`); }
-            catch(e) { t.close(); notify(`<div class='title'>连接失败</div>无法登陆 qBittorrent，请检查地址/用户名/密码`, 6000); }
+            DL_PATH = modal.querySelector('#nhq_path').value.trim();
+            localStorage.setItem('nh_dl_path', DL_PATH);
+            notify(`<div class='title'>配置已保存</div>`, 3000); overlay.remove();
         });
     }
 
     /**************************************************************************
-     * 7.1 全局界面定制 (UI Customization)
+     * 7. 全局界面定制
      **************************************************************************/
     function customizeUI() {
         const searchInput = document.querySelector('input[name="q"]:not([data-nh-injected])');
@@ -616,7 +771,7 @@
     }
 
     /**************************************************************************
-     * 8. SPA 路由适配与初始化 (Initialization via MutationObserver)
+     * 8. 初始化与监听
      **************************************************************************/
 
     function initFeatures() {
@@ -629,6 +784,8 @@
             addBatchFeature();
         }
 
+        updateRetryButton();
+
         if (!document.getElementById('nhqb_settings_fallback')) {
             const fix = document.createElement('div');
             fix.id = 'nhqb_settings_fallback';
@@ -637,9 +794,26 @@
             document.body.appendChild(fix);
             document.getElementById('nhqb_settings_btn2').addEventListener('click', showSettingsModal);
         }
+        
+        const HISTORY_KEY = 'nh_qb_push_history_v2';
+        const getBjTime = () => new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+        let pushHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || '{"max":{"id":0,"time":"--"},"prev":{"id":0,"time":"--"}}');
+        if (!document.getElementById('nh-max-gid-display')) {
+            const renderGidInfo = (data) => {
+                const linkStyle = 'color:#ed2553;font-weight:bold;font-size:14px;margin:0 4px;text-decoration:none;border-bottom:1px dashed #ed2553;';
+                const timeStyle = 'color:#888;font-size:11px;font-family:monospace;min-width:110px;text-align:right;display:inline-block;';
+                const rowStyle = 'display:flex;align-items:center;justify-content:flex-end;width:100%;margin-bottom:2px;';
+                return `<div style="${rowStyle}"><span>已下载最大 GID:</span><a href="/g/${data.max.id}/" target="_blank" style="${linkStyle}">${data.max.id}</a><span style="${timeStyle}">[${data.max.time}]</span></div>` +
+                       `<div style="${rowStyle}"><span style="color:#aaa;">上次下载最大 GID:</span><a href="/g/${data.prev.id}/" target="_blank" style="${linkStyle}">${data.prev.id}</a><span style="${timeStyle}">[${data.prev.time}]</span></div>`;
+            };
+            const maxIdInfo = document.createElement('div');
+            maxIdInfo.id = 'nh-max-gid-display';
+            maxIdInfo.style.cssText = 'position:fixed;bottom:80px;right:10px;z-index:99990;background:rgba(0,0,0,0.9);padding:8px 12px;border-radius:4px;color:#ccc;font-size:12px;pointer-events:auto;text-align:right;box-shadow:0 2px 8px rgba(0,0,0,0.5);display:flex;flex-direction:column;align-items:flex-end;';
+            maxIdInfo.innerHTML = renderGidInfo(pushHistory);
+            document.body.appendChild(maxIdInfo);
+        }
     }
 
-    // 将渲染调度封装，利用 requestAnimationFrame 防抖且消除闪烁
     let isScheduled = false;
     function requestRender() {
         if (!isScheduled) {
@@ -651,12 +825,31 @@
         }
     }
 
-    requestRender(); // 初次加载渲染
-
-    // 监听 DOM 变化
-    const observer = new MutationObserver(() => {
+    const originalPushState = history.pushState;
+    history.pushState = function() {
+        originalPushState.apply(this, arguments);
         requestRender();
-    });
-    observer.observe(document.body, { childList: true, subtree: true });
+    };
+    const originalReplaceState = history.replaceState;
+    history.replaceState = function() {
+        originalReplaceState.apply(this, arguments);
+        requestRender();
+    };
+    window.addEventListener('popstate', requestRender);
+
+    function observeDOM() {
+        const observer = new MutationObserver(requestRender);
+        const target = document.documentElement || document.body;
+        if (target) {
+            observer.observe(target, { childList: true, subtree: true });
+            requestRender();
+        }
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', observeDOM);
+    } else {
+        observeDOM();
+    }
 
 })();
