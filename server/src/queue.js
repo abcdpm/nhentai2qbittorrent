@@ -3,6 +3,25 @@ const { sleep, uuid, nowIso, galleryFolderName } = require('./util');
 
 const ACTIVE_STATUSES = ['queued', 'downloading'];
 
+/** 校验外部传入的元数据（油猴脚本推送时附带，服务端即可零元数据请求、纯 CDN 下载） */
+function sanitizeMeta(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    const mediaId = String(raw.mediaId == null ? '' : raw.mediaId).trim();
+    const numPages = parseInt(raw.numPages, 10);
+    if (!/^\d+$/.test(mediaId) || !Number.isFinite(numPages) || numPages <= 0 || numPages > 2000) return null;
+
+    const okExts = ['jpg', 'png', 'gif', 'webp'];
+    const extMap = Array.isArray(raw.extMap)
+        ? raw.extMap.slice(0, numPages).map(e => (okExts.includes(String(e).toLowerCase()) ? String(e).toLowerCase() : 'jpg'))
+        : [];
+
+    let coverHost = null;
+    const host = String(raw.coverHost == null ? '' : raw.coverHost).trim().replace(/\/+$/, '');
+    if (/^https?:\/\/[a-z0-9.\-]+(:\d+)?$/i.test(host)) coverHost = host;
+
+    return { mediaId, numPages, extMap, coverHost };
+}
+
 /**
  * 下载队列：FIFO 后台自动排队下载，
  * 支持暂停/继续、取消、失败重试、按 gid 去重、任务间隔。
@@ -74,6 +93,8 @@ class QueueManager {
                 revivable.createdAt = nowIso();
                 revivable.startedAt = null;
                 revivable.finishedAt = null;
+                const revMeta = sanitizeMeta(raw.meta);
+                if (revMeta) revivable.meta = revMeta;
                 added.push(revivable);
                 if (this.logger) this.logger.info(`任务重新入队: ${gid} ${title}`);
                 continue;
@@ -92,7 +113,7 @@ class QueueManager {
                 error: null,
                 downloadedBytes: 0,
                 convertedToWebp: false,
-                meta: null,
+                meta: sanitizeMeta(raw.meta),
                 createdAt: nowIso(),
                 startedAt: null,
                 finishedAt: null

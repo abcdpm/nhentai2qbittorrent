@@ -65,17 +65,19 @@ function createMockSite(galleries) {
         }
 
         if (parts[0] === 'api' && parts[1]) {
-            state.metaHits.push({ kind: 'api', id: parts[1], cookie: req.headers.cookie || '' });
+            state.metaHits.push({ kind: 'api', id: parts[1], cookie: req.headers.cookie || '', auth: req.headers.authorization || '' });
             const action = planFor('api', parts[1]);
             if (action === '403') { res.writeHead(403); res.end('cf challenge'); return; }
             const g = state.galleries[parts[1]];
             if (!g) { res.writeHead(404); res.end('not found'); return; }
+            const typeMap = { j: 'jpg', p: 'png', g: 'gif', w: 'webp' };
+            // 官方 v2 API 格式：pages[].path 含精确文件名
             const json = {
-                id: parts[1],
+                id: Number(parts[1]),
                 media_id: g.mediaId,
-                num_pages: g.types.length,
                 title: { pretty: g.title, english: g.title },
-                images: { pages: g.types.map(t => ({ t })) }
+                num_pages: g.types.length,
+                pages: g.types.map((t, i) => ({ number: i + 1, path: `galleries/${g.mediaId}/${i + 1}.${typeMap[t]}` }))
             };
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify(json));
@@ -479,11 +481,61 @@ test('JSON API 元数据解析（备用源）', () => {
     assert.deepStrictEqual(meta.extMap, ['jpg', 'gif']);
 });
 
-test('元数据 403 自动回退 JSON API 备用源，并携带配置的 Cookie', async () => {
+test('官方 v2 API 元数据解析（pages.path 精确扩展名）', () => {
+    const meta = parseGalleryApi({
+        id: 687629, media_id: '4238061',
+        title: { pretty: '小目与小潘多拉', english: '[ふぇぇり] 小目与小潘多拉' },
+        num_pages: 3,
+        pages: [
+            { number: 1, path: 'galleries/4238061/1.webp' },
+            { number: 2, path: 'galleries/4238061/2.jpg' },
+            { number: 3, path: 'galleries/4238061/3.gif' }
+        ]
+    }, '687629');
+    assert.strictEqual(meta.mediaId, '4238061');
+    assert.strictEqual(meta.numPages, 3);
+    assert.strictEqual(meta.title, '小目与小潘多拉');
+    assert.deepStrictEqual(meta.extMap, ['webp', 'jpg', 'gif']);
+});
+
+test('任务自带 meta（脚本随推送附带）→ 零元数据请求，纯 CDN 下载', async () => {
     const mock = await createMockSite(GALLERY_1);
-    mock.plan('html|123001', '403');          // 详情页持续 403
+    const env = makeEnv(mock);
+    try {
+        const { added } = env.queue.enqueue([{
+            gid: '123001',
+            title: '[作者A] 测试本子标题',
+            meta: { mediaId: '900001', numPages: 3, extMap: ['jpg', 'png', 'webp'], coverHost: null }
+        }]);
+        assert.strictEqual(added[0].meta.mediaId, '900001', 'meta 应随任务保存');
+
+        // 非法 meta 应被拒绝（回退为服务端自行抓取）
+        const bad = env.queue.enqueue([{ gid: '123002', title: 'x', meta: { mediaId: '', numPages: 0 } }]);
+        assert.strictEqual(bad.added[0].meta, null, '非法 meta 应置空');
+        env.queue.remove(bad.added[0].id);   // 移除，避免其抓取元数据干扰零请求断言
+
+        env.queue.start();
+        const task = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 15000, '任务完成');
+
+        assert.strictEqual(task.status, 'completed');
+        const dir = path.join(env.config.get('downloadDir'), '[作者A] 测试本子标题 [123001]');
+        assert.deepStrictEqual(filesOf(dir), ['1.jpg', '2.png', '3.webp']);
+        assert.strictEqual(mock.state.metaHits.length, 0, '应零元数据请求（纯 CDN 下载）');
+    } finally {
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('元数据 HTML 失败时回退 API 模板（显式配置时），并携带 Cookie / API Key', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    mock.plan('html|123001', '403');          // 详情页持续 403 → 回退 API
     const env = makeEnv(mock);
     env.config.data.nhCookie = 'cf_clearance=abc123';
+    env.config.data.nhApiKey = 'k-123';
     try {
         const { added } = env.queue.enqueue([{ gid: '123001', title: '[作者A] 测试本子标题' }]);
         env.queue.start();
@@ -496,9 +548,34 @@ test('元数据 403 自动回退 JSON API 备用源，并携带配置的 Cookie'
         const dir = path.join(env.config.get('downloadDir'), '[作者A] 测试本子标题 [123001]');
         assert.deepStrictEqual(filesOf(dir), ['1.jpg', '2.png', '3.webp']);
 
+        const htmlHit = mock.state.metaHits.find(h => h.kind === 'html' && h.id === '123001');
+        assert.ok(htmlHit, '应先尝试详情页 HTML（原逻辑）');
+        assert.strictEqual(htmlHit.cookie, 'cf_clearance=abc123', 'HTML 请求应携带 Cookie');
         const apiHit = mock.state.metaHits.find(h => h.kind === 'api' && h.id === '123001');
-        assert.ok(apiHit, '应请求过 JSON API 备用源');
-        assert.strictEqual(apiHit.cookie, 'cf_clearance=abc123', '元数据请求应携带配置的 Cookie');
+        assert.ok(apiHit, 'HTML 失败后应回退 API 模板');
+        assert.strictEqual(apiHit.auth, 'Key k-123', 'API 请求应携带 Authorization: Key <nhApiKey>');
+    } finally {
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('apiUrlTemplate 留空（默认）时绝不请求官方 API', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    mock.plan('html|123001', '403');          // HTML 也失败
+    const env = makeEnv(mock);
+    env.config.data.apiUrlTemplate = '';      // 默认禁用官方 API
+    try {
+        const { added } = env.queue.enqueue([{ gid: '123001', title: '[作者A] 测试本子标题' }]);
+        env.queue.start();
+        const task = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 20000, '任务完成');
+
+        assert.strictEqual(task.status, 'failed');
+        assert.ok(/重新推送|已禁用/.test(task.error || ''), '错误应提示重新推送/说明 API 已禁用');
+        assert.ok(!mock.state.metaHits.some(h => h.kind === 'api'), '默认不得请求官方 API');
     } finally {
         await env.queue.stop();
         mock.close();

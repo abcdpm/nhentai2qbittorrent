@@ -208,7 +208,7 @@
     /* ---------- 设置 ---------- */
     const SETTINGS_FIELDS = ['downloadDir', 'requestIntervalMs', 'galleryIntervalMs', 'pageConcurrency',
         'timeoutMs', 'maxAttempts', 'retryDelayMs', 'repairRounds', 'webpQuality',
-        'metaUrlTemplate', 'apiUrlTemplate', 'nhCookie', 'userAgent'];
+        'metaUrlTemplate', 'apiUrlTemplate', 'nhApiKey', 'nhCookie', 'userAgent'];
 
     async function loadSettings() {
         try {

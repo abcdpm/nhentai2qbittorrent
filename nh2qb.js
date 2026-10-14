@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         nHentai → Local Image Scraper
 // @namespace    http://tampermonkey.net/
-// @version      5.3.0
-// @description  直接提取高清原图下载；「推送到下载服务」本地服务队列（完整性校验/超时重传/多CDN轮询/WebP统一转换/间隔下载/自动压缩zip）；自动同步浏览器Cookie解除403；下载完成自动标记已下载；文件夹格式：本子名 [本子id]
+// @version      5.5.0
+// @description  直接提取高清原图下载；「推送到下载服务」自动附带元数据（media_id/Pages数），服务端纯CDN下载避开官方API限流；完整性校验/超时重传/多CDN轮询/WebP统一/自动压缩zip；下载完成自动标记已下载；文件夹格式：本子名 [本子id]
 // @author       Paccu
 // @match        https://nhentai.net/g/*
 // @match        https://nhentai.net/
@@ -207,6 +207,21 @@
         });
     }
 
+    /** 抓取单本元数据用于随任务上传（失败返回 null，服务端会回退自行抓取） */
+    async function fetchMetaForPush(gid, htmlString = null) {
+        try {
+            const m = await fetchGalleryMeta(gid, htmlString);
+            return {
+                mediaId: m.mediaId,
+                numPages: m.numPages,
+                extMap: m.extMap || [],
+                coverHost: m.imgHost ? 'https://' + m.imgHost : null
+            };
+        } catch (e) {
+            return null;
+        }
+    }
+
     /** 将若干本子推送到本地下载服务的队列 */
     async function pushItemsToServer(items) {
         if (!items.length) { notify(`<div class='title'>提示</div>请先勾选要推送的本子！`, 4000); return null; }
@@ -216,6 +231,17 @@
             return null;
         }
         await syncCookieToServer(true);   // 推送前先刷新浏览器 Cookie 到服务端（解 403）
+
+        // 自动附带元数据（原逻辑：页面解析 media_id / Pages 数 / 后缀表），
+        // 服务端拿到后直接请求 CDN 下载图片，零元数据请求（避开官方 API 限流）
+        for (let i = 0; i < items.length; i++) {
+            const it = items[i];
+            if (it.meta) continue;
+            stickyNotify('nh-push-progress', `<div class='title'>正在解析元数据 (${i + 1}/${items.length})...</div>`);
+            it.meta = await fetchMetaForPush(it.gid);
+            if (i < items.length - 1) await new Promise(r => setTimeout(r, 350));
+        }
+
         const res = await serverApi('/api/tasks', 'POST', { items });
         if (!res.ok) {
             const reason = (res.json && res.json.error) || (res.status === 0 ? '无法连接本地下载服务（请确认已启动）' : `HTTP ${res.status}`);
@@ -436,7 +462,7 @@
         if (!panel) {
             panel = document.createElement('div');
             panel.id = 'nhqb_detail_panel';
-            panel.style.cssText = 'position:fixed;bottom:20px;right:70px;z-index:99999;display:flex;flex-direction:row;gap:8px;';
+            panel.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:99999;display:flex;flex-direction:row;gap:8px;';
             document.body.appendChild(panel);
         }
         let btn = panel.querySelector('.nh-custom-btn-single');
@@ -468,9 +494,22 @@
         pushBtn.className = 'btn btn-success nh-custom-btn-push';
         pushBtn.innerText = '推送到下载服务';
         panel.appendChild(pushBtn);
+
+        // 设置按钮并入同一按钮组末尾，保证 [提取原图下载][推送到下载服务][设置] 等距
+        let setBtn = document.getElementById('nhqb_settings_btn2');
+        if (!setBtn) {
+            setBtn = document.createElement('button');
+            setBtn.id = 'nhqb_settings_btn2';
+            setBtn.className = 'btn btn-primary';
+            setBtn.innerText = '设置';
+            setBtn.addEventListener('click', showSettingsModal);
+        }
+        panel.appendChild(setBtn);
         pushBtn.addEventListener('click', async () => {
             const title = document.querySelector('#info h2')?.innerText?.trim() || document.querySelector('#info h1')?.innerText?.trim() || currentGid;
-            const result = await pushItemsToServer([{ gid: String(currentGid), title }]);
+            // 当前详情页直接解析元数据随任务上传（服务端纯 CDN 下载）
+            const meta = await fetchMetaForPush(String(currentGid), document.documentElement.innerHTML);
+            const result = await pushItemsToServer([{ gid: String(currentGid), title, meta }]);
             if (!result) return;
             const added = (result.added || []).length;
             const skipped = result.skipped || [];
@@ -719,12 +758,14 @@
         if (!document.getElementById('nhqb_right_panel')) {
             const rightPanel = document.createElement('div');
             rightPanel.id = 'nhqb_right_panel';
-            rightPanel.style.cssText = 'position:fixed;bottom:20px;right:70px;z-index:99999;display:flex;flex-direction:row;gap:8px;';
+            rightPanel.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:99999;display:flex;flex-direction:row;gap:8px;';
             rightPanel.innerHTML = `
                 <button id="nhqb_push_btn" class="btn btn-success">推送到下载服务</button>
                 <button id="nhqb_batch_btn" class="btn btn-primary">批量下载到本地</button>
+                <button id="nhqb_settings" class="btn btn-primary">设置</button>
             `;
             document.body.appendChild(rightPanel);
+            document.getElementById('nhqb_settings').addEventListener('click', showSettingsModal);
 
             document.getElementById('nhqb_push_btn').addEventListener('click', async () => {
                 const allChecked = Array.from(document.querySelectorAll("input[type=checkbox][data-gid]:checked"));
@@ -778,14 +819,7 @@
             });
         }
 
-        if (!document.getElementById('nhqb_settings_wrapper')) {
-            const setBtn = document.createElement('div');
-            setBtn.id = 'nhqb_settings_wrapper';
-            setBtn.className = 'nh-qb-fixed-btn';
-            setBtn.innerHTML = `<button id='nhqb_settings' class='btn btn-primary'>设置</button>`;
-            document.body.appendChild(setBtn);
-            document.getElementById('nhqb_settings').addEventListener('click', showSettingsModal);
-        }
+        // （设置按钮已并入右下角按钮组 nhqb_right_panel，见上方）
 
         const thumbs = document.querySelectorAll('.gallery');
         thumbs.forEach(thumb => {
@@ -1026,13 +1060,16 @@
 
         updateRetryButton();
 
-        if (!document.getElementById('nhqb_settings_fallback')) {
-            const fix = document.createElement('div');
-            fix.id = 'nhqb_settings_fallback';
-            fix.className = 'nh-qb-fixed-btn';
-            fix.innerHTML = `<button id='nhqb_settings_btn2' class='btn btn-primary' style='position:fixed;bottom:20px;right:10px;z-index:99999'>设置</button>`;
-            document.body.appendChild(fix);
-            document.getElementById('nhqb_settings_btn2').addEventListener('click', showSettingsModal);
+        // 兜底设置按钮：仅当页面没有右下角按钮组时创建，避免重复按钮
+        if (!document.getElementById('nhqb_right_panel') && !document.getElementById('nhqb_detail_panel')) {
+            if (!document.getElementById('nhqb_settings_fallback')) {
+                const fix = document.createElement('div');
+                fix.id = 'nhqb_settings_fallback';
+                fix.className = 'nh-qb-fixed-btn';
+                fix.innerHTML = `<button id='nhqb_settings_btn2' class='btn btn-primary' style='position:fixed;bottom:20px;right:20px;z-index:99999'>设置</button>`;
+                document.body.appendChild(fix);
+                document.getElementById('nhqb_settings_btn2').addEventListener('click', showSettingsModal);
+            }
         }
         
         const HISTORY_KEY = 'nh_qb_push_history_v2';

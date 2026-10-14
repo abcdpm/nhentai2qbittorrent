@@ -47,9 +47,23 @@ function parseGalleryHtml(html, gid) {
     return { gid: String(gid), mediaId, numPages, title, extMap, coverHost };
 }
 
-/** 解析官方 JSON API（/api/gallery/{gid}）响应，与 HTML 解析结果同构 */
+/** 解析 JSON API 响应（兼容官方 v2 与旧版格式），与 HTML 解析结果同构 */
 function parseGalleryApi(json, gid) {
     if (!json || typeof json !== 'object') return null;
+
+    // 新版 v2：{ media_id, title:{pretty,english}, num_pages, pages:[{number,path:"galleries/x/1.webp"}] }
+    if (Array.isArray(json.pages) && json.pages.length && json.pages[0] && json.pages[0].path) {
+        const mediaId = json.media_id != null ? String(json.media_id) : null;
+        const numPages = json.num_pages || json.pages.length;
+        const title = (json.title && (json.title.pretty || json.title.english || json.title.japanese)) || `gallery-${gid}`;
+        const extMap = json.pages.map(p => {
+            const m = String(p.path || '').match(/\.([a-z0-9]+)$/i);
+            return m ? m[1].toLowerCase() : 'jpg';
+        });
+        return { gid: String(gid), mediaId, numPages, title, extMap, coverHost: null };
+    }
+
+    // 旧版：{ images:{pages:[{t}]} }
     const pages = json.images && Array.isArray(json.images.pages) ? json.images.pages : [];
     const mediaId = json.media_id != null ? String(json.media_id) : null;
     const numPages = json.num_pages || pages.length;
@@ -84,6 +98,9 @@ function browserHeaders(config, isApi) {
         headers['Sec-Fetch-Site'] = 'none';
         headers['Sec-Fetch-User'] = '?1';
     }
+    // nhentai API v2 官方密钥（可选，防止未来收紧；在 nhentai 账户设置生成）
+    const apiKey = config.get('nhApiKey');
+    if (isApi && apiKey) headers['Authorization'] = `Key ${apiKey}`;
     const cookie = config.get('nhCookie');
     if (cookie) headers['Cookie'] = cookie;
     return headers;
@@ -160,10 +177,10 @@ async function fetchMetaFromApi(gid, config, logger) {
 }
 
 /**
- * 抓取并解析本子元数据（双源回退）：
- *   1) 详情页 HTML；失败（403/404/解析失败等）
- *   2) 官方 JSON API 备用源。
- * 双源都失败时抛出聚合错误；403 时提示配置浏览器 Cookie（nhCookie）。
+ * 抓取并解析本子元数据（原逻辑优先）：
+ *   1) 详情页 HTML（media_id / "Pages: N" / 后缀表直接从页面拿）
+ *   2) 仅当配置了 apiUrlTemplate 才尝试 JSON API（默认禁用——官方 API 限流严重）
+ * 建议方式：油猴脚本推送时直接附带 meta，服务端即可纯 CDN 下载，零元数据请求。
  */
 async function fetchGalleryMeta(gid, config, logger) {
     const errors = [];
@@ -171,22 +188,23 @@ async function fetchGalleryMeta(gid, config, logger) {
     try {
         return await fetchMetaFromHtml(gid, config, logger);
     } catch (e) {
-        if (e instanceof RateLimitError && e.retryAfterSec > 20) throw e; // 严格限流时不浪费备用源
+        if (e instanceof RateLimitError && e.retryAfterSec > 20) throw e;
         errors.push(`详情页: ${e.message}`);
-        if (logger) logger.warn(`本子 ${gid} 详情页元数据获取失败(${e.message})，回退 JSON API 备用源`);
+        if (logger) logger.warn(`本子 ${gid} 详情页元数据获取失败(${e.message})`);
     }
 
-    try {
-        return await fetchMetaFromApi(gid, config, logger);
-    } catch (e) {
-        errors.push(`API: ${e.message}`);
+    const apiUrl = String(config.get('apiUrlTemplate') || '').trim();
+    if (apiUrl) {
+        try {
+            return await fetchMetaFromApi(gid, config, logger);
+        } catch (e) {
+            errors.push(`API: ${e.message}`);
+        }
+    } else {
+        errors.push('API: 已禁用（apiUrlTemplate 为空，避免官方 API 限流）');
     }
 
-    const all403 = errors.length > 0 && errors.every(m => /403/.test(m));
-    const hint = all403
-        ? '（403 被 Cloudflare 拦截：请复制浏览器登录 nhentai 后的 Cookie，填到 Web 设置 → 高级 → 浏览器 Cookie，再重试任务）'
-        : '';
-    const err = new Error(`元数据获取失败：${errors.join('；')}${hint}`);
+    const err = new Error(`元数据获取失败：${errors.join('；')}（建议从 nHentai 页面重新推送本子，脚本会自动附带元数据）`);
     if (errors.some(m => /429|限流/.test(m))) err.retryAfterSec = 30;
     throw err;
 }
