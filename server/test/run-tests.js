@@ -16,7 +16,7 @@ const { TaskStore } = require('../src/store');
 const { Downloader, magicBlob, sniffMagic } = require('../src/downloader');
 const { QueueManager } = require('../src/queue');
 const { createHandler } = require('../src/api');
-const { parseGalleryHtml, fetchGalleryMeta } = require('../src/nhentai');
+const { parseGalleryHtml, parseGalleryApi, fetchGalleryMeta } = require('../src/nhentai');
 const { galleryFolderName, sanitizeFileName } = require('../src/util');
 const { readZipEntries, extractZipEntry, crc32, numericNameCompare } = require('../src/zip');
 
@@ -29,14 +29,16 @@ function createMockSite(galleries) {
         galleries,
         plans: new Map(),
         hits: [],
-        pending: []
+        pending: [],
+        metaHits: []
     };
 
     function planFor(hostSeg, file) {
         for (const key of [`${hostSeg}|${file}`, file]) {
-            const arr = state.plans.get(key);
-            if (arr && arr.length) return arr.shift();
-            if (arr && !Array.isArray(arr)) return arr;   // 常量行为
+            const plan = state.plans.get(key);
+            if (plan === undefined) continue;
+            if (Array.isArray(plan)) return plan.length ? plan.shift() : 'ok';
+            return plan;   // 常量行为（如恒定 '403'）
         }
         return 'ok';
     }
@@ -46,6 +48,9 @@ function createMockSite(galleries) {
         const parts = u.pathname.split('/').filter(Boolean);
 
         if (parts[0] === 'g' && parts[1]) {
+            state.metaHits.push({ kind: 'html', id: parts[1], cookie: req.headers.cookie || '' });
+            const action = planFor('html', parts[1]);
+            if (action === '403') { res.writeHead(403); res.end('cf challenge'); return; }
             const g = state.galleries[parts[1]];
             if (!g) { res.writeHead(404); res.end('not found'); return; }
             const pagesJson = g.types.map(t => `{"t":"${t}"}`).join(',');
@@ -56,6 +61,24 @@ function createMockSite(galleries) {
 </body></html>`;
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end(html);
+            return;
+        }
+
+        if (parts[0] === 'api' && parts[1]) {
+            state.metaHits.push({ kind: 'api', id: parts[1], cookie: req.headers.cookie || '' });
+            const action = planFor('api', parts[1]);
+            if (action === '403') { res.writeHead(403); res.end('cf challenge'); return; }
+            const g = state.galleries[parts[1]];
+            if (!g) { res.writeHead(404); res.end('not found'); return; }
+            const json = {
+                id: parts[1],
+                media_id: g.mediaId,
+                num_pages: g.types.length,
+                title: { pretty: g.title, english: g.title },
+                images: { pages: g.types.map(t => ({ t })) }
+            };
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(json));
             return;
         }
 
@@ -109,6 +132,7 @@ function makeEnv(mock, tmpName) {
     config.data.zipAfterVerify = false;
     config.data.preferCoverHost = false;
     config.data.metaUrlTemplate = `http://127.0.0.1:${mock.port}/g/{gid}/`;
+    config.data.apiUrlTemplate = `http://127.0.0.1:${mock.port}/api/{gid}`;
     config.data.cdnBaseUrls = [`http://127.0.0.1:${mock.port}/cdn1`, `http://127.0.0.1:${mock.port}/cdn2`];
     fs.mkdirSync(config.data.downloadDir, { recursive: true });
 
@@ -437,6 +461,44 @@ test('keepFolderAfterZip=true 时压缩后保留原文件夹', async () => {
         const dl = env.config.get('downloadDir');
         assert.ok(fs.existsSync(path.join(dl, '[作者B] 旋转与重试 [123002].zip')), 'zip 应生成');
         assert.ok(fs.existsSync(path.join(dl, '[作者B] 旋转与重试 [123002]')), '原文件夹应保留');
+    } finally {
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('JSON API 元数据解析（备用源）', () => {
+    const meta = parseGalleryApi({
+        media_id: '555', num_pages: 2,
+        title: { pretty: 'Pretty Title' },
+        images: { pages: [{ t: 'j' }, { t: 'g' }] }
+    }, '42');
+    assert.strictEqual(meta.mediaId, '555');
+    assert.strictEqual(meta.numPages, 2);
+    assert.strictEqual(meta.title, 'Pretty Title');
+    assert.deepStrictEqual(meta.extMap, ['jpg', 'gif']);
+});
+
+test('元数据 403 自动回退 JSON API 备用源，并携带配置的 Cookie', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    mock.plan('html|123001', '403');          // 详情页持续 403
+    const env = makeEnv(mock);
+    env.config.data.nhCookie = 'cf_clearance=abc123';
+    try {
+        const { added } = env.queue.enqueue([{ gid: '123001', title: '[作者A] 测试本子标题' }]);
+        env.queue.start();
+        const task = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 20000, '任务完成');
+
+        assert.strictEqual(task.status, 'completed', '应经 API 备用源完成, got: ' + task.status + ' err=' + task.error);
+        const dir = path.join(env.config.get('downloadDir'), '[作者A] 测试本子标题 [123001]');
+        assert.deepStrictEqual(filesOf(dir), ['1.jpg', '2.png', '3.webp']);
+
+        const apiHit = mock.state.metaHits.find(h => h.kind === 'api' && h.id === '123001');
+        assert.ok(apiHit, '应请求过 JSON API 备用源');
+        assert.strictEqual(apiHit.cookie, 'cf_clearance=abc123', '元数据请求应携带配置的 Cookie');
     } finally {
         await env.queue.stop();
         mock.close();

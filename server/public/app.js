@@ -124,7 +124,7 @@
 
         $('#tasks-summary').textContent = `共 ${state.tasks.length} 个任务`;
         if (tasks.length === 0) {
-            list.innerHTML = `<div class="empty">暂无任务<br><span class="small">在 nHentai 页面勾选本子后点「📤 推送到下载服务」，任务会自动排队下载</span></div>`;
+            list.innerHTML = `<div class="empty">暂无任务<br><span class="small">在 nHentai 页面勾选本子后点「推送到下载服务」，任务会自动排队下载</span></div>`;
             return;
         }
 
@@ -208,7 +208,7 @@
     /* ---------- 设置 ---------- */
     const SETTINGS_FIELDS = ['downloadDir', 'requestIntervalMs', 'galleryIntervalMs', 'pageConcurrency',
         'timeoutMs', 'maxAttempts', 'retryDelayMs', 'repairRounds', 'webpQuality',
-        'metaUrlTemplate', 'userAgent'];
+        'metaUrlTemplate', 'apiUrlTemplate', 'nhCookie', 'userAgent'];
 
     async function loadSettings() {
         try {

@@ -151,11 +151,11 @@ class Downloader {
                     await this._gate();
                     try {
                         const res = await fetch(url, {
-                            headers: {
+                            headers: Object.assign({
                                 'User-Agent': cfg.get('userAgent'),
                                 'Referer': 'https://nhentai.net/',
                                 'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
-                            },
+                            }, cfg.get('nhCookie') ? { 'Cookie': cfg.get('nhCookie') } : {}),
                             signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
                         });
 

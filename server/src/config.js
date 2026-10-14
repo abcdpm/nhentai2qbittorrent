@@ -26,6 +26,8 @@ const DEFAULTS = {
     keepFolderAfterZip: false,  // 压缩后是否保留原图片文件夹
     // 源站适配（高级项，一般无需修改；测试/镜像时可覆盖）
     metaUrlTemplate: 'https://nhentai.net/g/{gid}/',
+    apiUrlTemplate: 'https://nhentai.net/api/gallery/{gid}',   // 详情页被 403 时的备用元数据源
+    nhCookie: '',               // 浏览器 Cookie（被 Cloudflare 403 拦截时填入即可解除）
     preferCoverHost: true,      // 优先用封面所在 CDN 节点
     cdnBaseUrls: [
         'https://i.nhentai.net',

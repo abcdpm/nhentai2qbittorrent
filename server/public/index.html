@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nHentai 下载服务</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -123,6 +124,8 @@
                     <h3>高级（源站适配，一般无需修改）</h3>
                     <div class="form-grid">
                         <label class="field span2"><span>本子页面 URL 模板（{gid} 占位）</span><input type="text" id="set-metaUrlTemplate"></label>
+                        <label class="field span2"><span>备用元数据 API 模板（详情页 403 时自动回退）</span><input type="text" id="set-apiUrlTemplate"></label>
+                        <label class="field span2"><span>浏览器 Cookie（被 Cloudflare 403 拦截时填入，如 cf_clearance=...; 会话cookie）</span><input type="text" id="set-nhCookie" placeholder="可选"></label>
                         <label class="field check"><input type="checkbox" id="set-preferCoverHost"><span>优先使用封面所在 CDN 节点</span></label>
                         <label class="field span2"><span>CDN 节点列表（每行一个）</span><textarea id="set-cdnBaseUrls" rows="6" spellcheck="false"></textarea></label>
                         <label class="field span2"><span>User-Agent</span><input type="text" id="set-userAgent"></label>
