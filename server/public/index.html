@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nHentai 下载服务</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<!-- ============ API Key 鉴权门 ============ -->
+<div id="gate" class="gate">
+    <div class="gate-card">
+        <div class="gate-logo">📥</div>
+        <h1>nHentai 下载服务</h1>
+        <p class="muted">此服务受 API Key 保护，输入密钥以进入控制台</p>
+        <input id="gate-key" type="password" placeholder="nhk_xxxxxxxx..." autocomplete="off" spellcheck="false">
+        <button id="gate-submit" class="btn primary wide">进入控制台</button>
+        <div id="gate-error" class="error-text"></div>
+        <div class="gate-help">
+            首次使用？密钥在服务启动日志中打印，或查看 <code>server/data/INITIAL_API_KEY.txt</code>
+        </div>
+    </div>
+</div>
+
+<!-- ============ 主界面 ============ -->
+<div id="app" class="app hidden">
+    <aside class="sidebar">
+        <div class="brand">
+            <div class="brand-icon">📥</div>
+            <div>
+                <div class="brand-name">nHentai DL</div>
+                <div class="brand-sub">本地下载服务</div>
+            </div>
+        </div>
+        <nav class="nav">
+            <button class="nav-item active" data-view="tasks">🗂️&nbsp; 下载队列</button>
+            <button class="nav-item" data-view="settings">⚙️&nbsp; 下载设置</button>
+            <button class="nav-item" data-view="keys">🔑&nbsp; API 密钥</button>
+            <button class="nav-item" data-view="logs">📜&nbsp; 运行日志</button>
+            <button class="nav-item" data-view="about">ℹ️&nbsp; 使用说明</button>
+        </nav>
+        <div class="sidebar-foot">
+            <div id="conn-status" class="conn"><span class="dot"></span><span id="conn-text">已连接</span></div>
+            <div class="muted small">v<span id="ver-text">1.0.0</span></div>
+            <button id="btn-logout" class="btn ghost small">更换 API Key</button>
+        </div>
+    </aside>
+
+    <main class="main">
+        <header class="topbar">
+            <div>
+                <h2 id="view-title">下载队列</h2>
+                <div id="view-sub" class="muted small">后台自动排队下载 · 完整性校验 · 超时重传 · 多 CDN 轮询</div>
+            </div>
+            <div class="topbar-actions">
+                <div class="chips" id="stat-chips"></div>
+                <button id="btn-pause" class="btn">⏸ 暂停队列</button>
+                <button id="btn-retry-failed" class="btn">🔁 重试全部失败</button>
+            </div>
+        </header>
+
+        <!-- 队列 -->
+        <section id="view-tasks" class="view">
+            <div class="toolbar">
+                <div class="filters" id="task-filters">
+                    <button class="chip-btn active" data-filter="">全部</button>
+                    <button class="chip-btn" data-filter="queued">排队中</button>
+                    <button class="chip-btn" data-filter="downloading">下载中</button>
+                    <button class="chip-btn" data-filter="completed">已完成</button>
+                    <button class="chip-btn" data-filter="completed_with_errors">部分失败</button>
+                    <button class="chip-btn" data-filter="failed">失败</button>
+                    <button class="chip-btn" data-filter="cancelled">已取消</button>
+                </div>
+                <div class="muted small" id="tasks-summary"></div>
+            </div>
+            <div id="task-list" class="task-list"></div>
+        </section>
+
+        <!-- 设置 -->
+        <section id="view-settings" class="view hidden">
+            <div class="cards">
+                <div class="card">
+                    <h3>下载与保存</h3>
+                    <div class="form-grid">
+                        <label class="field span2">
+                            <span>下载根目录（文件夹格式：<b>本子名 [本子id]</b>）</span>
+                            <input type="text" id="set-downloadDir" placeholder="./downloads">
+                        </label>
+                    </div>
+                    <h3>间隔与并发</h3>
+                    <div class="form-grid">
+                        <label class="field"><span>图片请求间隔 (ms)</span><input type="number" id="set-requestIntervalMs" min="0" step="50"></label>
+                        <label class="field"><span>任务间隔 (ms)</span><input type="number" id="set-galleryIntervalMs" min="0" step="100"></label>
+                        <label class="field"><span>单本并发页数</span><input type="number" id="set-pageConcurrency" min="1" max="10"></label>
+                    </div>
+                    <h3>超时 / 重传 / 完整性校验</h3>
+                    <div class="form-grid">
+                        <label class="field"><span>单次请求超时 (ms)</span><input type="number" id="set-timeoutMs" min="1000" step="1000"></label>
+                        <label class="field"><span>每页最大重试轮数</span><input type="number" id="set-maxAttempts" min="1" max="20"></label>
+                        <label class="field"><span>重试退避基数 (ms)</span><input type="number" id="set-retryDelayMs" min="0" step="100"></label>
+                        <label class="field"><span>缺损补齐轮数</span><input type="number" id="set-repairRounds" min="0" max="10"></label>
+                    </div>
+                    <h3>图片格式（统一 WebP）</h3>
+                    <div class="form-grid">
+                        <label class="field check"><input type="checkbox" id="set-convertToWebp"><span>下载后统一转换为 WebP（jpg/png → webp，gif → 动态 webp；需可选依赖 sharp）</span></label>
+                        <label class="field"><span>WebP 质量 (1-100)</span><input type="number" id="set-webpQuality" min="1" max="100"></label>
+                        <label class="field check"><input type="checkbox" id="set-keepOriginal"><span>转换后保留原始图片文件</span></label>
+                        <div class="field span2"><span id="sharp-status" class="muted small"></span></div>
+                    </div>
+                    <div class="form-actions">
+                        <button id="btn-save-settings" class="btn primary">保存设置</button>
+                        <span id="settings-msg" class="muted small"></span>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <h3>高级（源站适配，一般无需修改）</h3>
+                    <div class="form-grid">
+                        <label class="field span2"><span>本子页面 URL 模板（{gid} 占位）</span><input type="text" id="set-metaUrlTemplate"></label>
+                        <label class="field check"><input type="checkbox" id="set-preferCoverHost"><span>优先使用封面所在 CDN 节点</span></label>
+                        <label class="field span2"><span>CDN 节点列表（每行一个）</span><textarea id="set-cdnBaseUrls" rows="6" spellcheck="false"></textarea></label>
+                        <label class="field span2"><span>User-Agent</span><input type="text" id="set-userAgent"></label>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- API 密钥 -->
+        <section id="view-keys" class="view hidden">
+            <div class="cards">
+                <div class="card">
+                    <h3>API 密钥管理</h3>
+                    <p class="muted small">所有 API 请求须携带请求头 <code>X-API-Key</code>。密钥仅保存 SHA-256 哈希，生成的明文只显示一次，请妥善保存。</p>
+                    <div class="key-create">
+                        <input type="text" id="key-name" placeholder="密钥名称，例如：油猴脚本 / 备用">
+                        <button id="btn-create-key" class="btn primary">＋ 生成新密钥</button>
+                    </div>
+                    <div id="key-new" class="key-new hidden">
+                        <div class="muted small">新密钥已生成（仅显示一次，请立即复制）：</div>
+                        <div class="key-new-row">
+                            <code id="key-new-value"></code>
+                            <button id="btn-copy-new-key" class="btn small">复制</button>
+                        </div>
+                    </div>
+                    <table class="table" id="key-table">
+                        <thead><tr><th>名称</th><th>前缀</th><th>创建时间</th><th>最近使用</th><th></th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- 日志 -->
+        <section id="view-logs" class="view hidden">
+            <div class="card">
+                <div class="card-head-row">
+                    <h3>运行日志</h3>
+                    <label class="check small"><input type="checkbox" id="log-follow" checked> 自动滚动</label>
+                </div>
+                <div id="log-list" class="log-list"></div>
+            </div>
+        </section>
+
+        <!-- 说明 -->
+        <section id="view-about" class="view hidden">
+            <div class="cards">
+                <div class="card">
+                    <h3>使用说明</h3>
+                    <ul class="about-list">
+                        <li><b>推送任务：</b>油猴脚本勾选本子后点「📤 推送到下载服务」，或用 API 提交：</li>
+                    </ul>
+                    <pre class="code">curl -X POST http://127.0.0.1:8787/api/tasks \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: nhk_你的密钥" \
+  -d '{"items":[{"gid":"123456","title":"本子标题"}]}'</pre>
+                    <ul class="about-list">
+                        <li><b>保存结构：</b><code>下载根目录/本子名 [本子id]/页码.后缀</code></li>
+                        <li><b>完整性校验：</b>每本下载完成后校验页数与文件头，缺损自动补齐重传</li>
+                        <li><b>超时重传：</b>单次请求超时自动换节点重试（每轮把所有 CDN 节点轮询一遍）</li>
+                        <li><b>格式支持：</b>webp / jpg / png / gif 全支持。开启“统一 WebP”后 jpg、png 转 webp；<b>gif 转为动态 WebP，保留动画</b>（需要 <code>npm install sharp</code>；未安装则保留原格式）</li>
+                        <li><b>间隔下载：</b>“图片请求间隔”防限流，“任务间隔”控制本子之间的间隔</li>
+                        <li><b>安全：</b>所有 API 均需 API Key，可在「API 密钥」页随时生成/吊销，公网暴露也不会被陌生人刷任务</li>
+                    </ul>
+                </div>
+            </div>
+        </section>
+
+
+    </main>
+</div>
+
+<div id="toast-wrap"></div>
+<script src="/app.js"></script>
+</body>
+</html>

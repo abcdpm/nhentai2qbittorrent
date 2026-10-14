@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         nHentai → Local Image Scraper
 // @namespace    http://tampermonkey.net/
-// @version      4.8.0
-// @description  放弃官方 ZIP API，直接提取高清原图。(重写极速探测机制，利用内存 Image 对象代替 HTTP 跨域请求，彻底消除油猴烦人的跨域允许弹窗)
+// @version      5.0.0
+// @description  直接提取高清原图下载；新增「推送本地下载服务」：勾选本子一键提交到本地服务的下载队列（完整性校验/超时重传/多CDN轮询/WebP统一转换/间隔下载）；文件夹格式：本子名 [本子id]
 // @author       Paccu
 // @match        https://nhentai.net/g/*
 // @match        https://nhentai.net/
@@ -15,6 +15,7 @@
 // @match        https://nhentai.net/*?*
 // @grant        GM_download
 // @grant        GM_addStyle
+// @grant        GM_xmlhttpRequest
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -74,6 +75,8 @@
      **************************************************************************/
 
     let DL_PATH = localStorage.getItem('nh_dl_path') || 'nHentai';
+    let SERVER_URL = (localStorage.getItem('nh_server_url') || 'http://127.0.0.1:8787').replace(/\/+$/, '');
+    let SERVER_KEY = localStorage.getItem('nh_server_key') || '';
     const CHECK_KEY = 'nh_qb_checked';
     const DOWNLOADED_KEY = 'nh_qb_downloaded_gids';
     let savedChecked = {};
@@ -156,6 +159,47 @@
 
     function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"})[c]); }
     function sanitizeFileName(name) { return name.replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim().substring(0, 150).trim().replace(/[.+\-\s]+$/g, ''); }
+    /** 文件夹名格式：本子名 [本子id] */
+    function galleryFolderName(title, gid) { return `${sanitizeFileName(title) || 'untitled'} [${gid}]`; }
+
+    /**************************************************************************
+     * 3.1 本地下载服务通信（队列推送）
+     **************************************************************************/
+    function serverApi(pathname, method = 'GET', body = null) {
+        return new Promise((resolve) => {
+            GM_xmlhttpRequest({
+                method,
+                url: SERVER_URL + pathname,
+                headers: Object.assign({ 'Content-Type': 'application/json' }, SERVER_KEY ? { 'X-API-Key': SERVER_KEY } : {}),
+                data: body ? JSON.stringify(body) : undefined,
+                timeout: 15000,
+                onload: (res) => {
+                    let json = null;
+                    try { json = JSON.parse(res.responseText); } catch (e) { /* 非 JSON */ }
+                    resolve({ ok: res.status >= 200 && res.status < 300, status: res.status, json });
+                },
+                onerror: () => resolve({ ok: false, status: 0, json: null }),
+                ontimeout: () => resolve({ ok: false, status: 0, json: null })
+            });
+        });
+    }
+
+    /** 将若干本子推送到本地下载服务的队列 */
+    async function pushItemsToServer(items) {
+        if (!items.length) { notify(`<div class='title'>提示</div>请先勾选要推送的本子！`, 4000); return null; }
+        if (!SERVER_KEY) {
+            notify(`<div class='title'>未配置 API Key</div>请在「设置」中填写本地下载服务的地址与 API Key`, 6000);
+            showSettingsModal();
+            return null;
+        }
+        const res = await serverApi('/api/tasks', 'POST', { items });
+        if (!res.ok) {
+            const reason = (res.json && res.json.error) || (res.status === 0 ? '无法连接本地下载服务（请确认已启动）' : `HTTP ${res.status}`);
+            notify(`<div class='title'>推送失败</div>${escapeHtml(reason)}`, 8000);
+            return null;
+        }
+        return res.json;
+    }
 
     /**************************************************************************
      * 4. 智能化图片下载引擎 (无弹窗图片预加载探测机制)
@@ -239,8 +283,8 @@
 
     async function processGalleryImages(gid, title, meta, onProgress) {
         const { mediaId, numPages, imgHost, extMap } = meta;
-        let cleanTitle = sanitizeFileName(title);
-        let baseDir = DL_PATH ? `${DL_PATH}/${cleanTitle}/${gid}` : `${cleanTitle}/${gid}`;
+        let folderName = galleryFolderName(title, gid);
+        let baseDir = DL_PATH ? `${DL_PATH}/${folderName}` : folderName;
 
         let success = 0; let failed = 0;
         let concurrency = 5; let i = 1;
@@ -322,12 +366,32 @@
         }
 
         if (btn) btn.remove();
+        const oldPushBtn = downloadWrapper.parentNode.querySelector('.nh-custom-btn-push');
+        if (oldPushBtn) oldPushBtn.remove();
         downloadWrapper.setAttribute('data-nh-gid', currentGid);
 
         btn = document.createElement('button');
         btn.className = 'btn nh-custom-btn-single ' + (isDownloaded ? 'btn-success' : 'btn-primary');
         btn.innerText = isDownloaded ? '已下载' : '提取原图下载';
         downloadWrapper.parentNode.appendChild(btn);
+
+        const pushBtn = document.createElement('button');
+        pushBtn.className = 'btn btn-secondary nh-custom-btn-push';
+        pushBtn.style.marginLeft = '6px';
+        pushBtn.innerText = '📤 推送到下载服务';
+        downloadWrapper.parentNode.appendChild(pushBtn);
+        pushBtn.addEventListener('click', async () => {
+            const title = document.querySelector('#info h2')?.innerText?.trim() || document.querySelector('#info h1')?.innerText?.trim() || currentGid;
+            const result = await pushItemsToServer([{ gid: String(currentGid), title }]);
+            if (!result) return;
+            const added = (result.added || []).length;
+            const skipped = result.skipped || [];
+            notify(`
+                <div class='title' style="color:#4caf50;">📤 ${added ? '已推送本子到下载服务' : '任务未入队'}</div>
+                <div style="font-size:12px;color:#ccc;word-break:break-all;">${escapeHtml(title)}</div>
+                ${skipped.length ? `<div style="font-size:12px;color:#ff9800;margin-top:6px;">${escapeHtml(skipped[0].reason)}</div>` : `<div style="font-size:12px;color:#ccc;margin-top:6px;">服务端将自动排队下载，可在 Web 控制台查看进度</div>`}
+            `, Infinity);
+        });
 
         btn.addEventListener('click', async () => {
             const gid = String(location.pathname.split('/')[2]);
@@ -528,6 +592,7 @@
             leftPanel.id = 'nhqb_left_panel';
             leftPanel.style.cssText = 'position:fixed;bottom:20px;left:20px;z-index:99999;display:flex;flex-direction:column;gap:8px;';
             leftPanel.innerHTML = `
+                <button id="nhqb_push_btn" class="btn btn-success">📤 推送到下载服务</button>
                 <button id="nhqb_select_cn" class="btn btn-primary">全选中文本子</button>
                 <button id="nhqb_deselect_all" class="btn btn-secondary">取消全部选中</button>
             `;
@@ -559,6 +624,37 @@
                 });
                 localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
                 if (count > 0) notify(`<div class='title'>取消选中</div>已清空本页 ${count} 个选中状态`, 5000);
+            });
+
+            document.getElementById('nhqb_push_btn').addEventListener('click', async () => {
+                const allChecked = Array.from(document.querySelectorAll("input[type=checkbox][data-gid]:checked"));
+                const items = allChecked
+                    .filter(cb => !downloadedSet.has(String(cb.dataset.gid)))
+                    .map(cb => ({ gid: String(cb.dataset.gid), title: cb.dataset.title || '' }));
+                if (!items.length) { notify(`<div class='title'>提示</div>请先勾选要推送的本子！`, 4000); return; }
+
+                const prog = stickyNotify('nh-push-progress', `<div class='title'>正在推送到下载服务...</div>共 ${items.length} 本`);
+                const result = await pushItemsToServer(items);
+                prog.close();
+                if (!result) return;
+
+                // 推送成功：取消勾选并清掉本地待选记录（下载进度以服务端队列为准）
+                for (const it of result.added || []) {
+                    delete savedChecked[it.gid];
+                    const cb = document.querySelector(`input[data-gid="${it.gid}"]`);
+                    if (cb) cb.checked = false;
+                }
+                localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+
+                const skipped = result.skipped || [];
+                const skippedHtml = skipped.length
+                    ? `<div class="nh-qb-notify-scroll" style="margin-top:8px;">${skipped.map(s => `<div style="color:#ffc107;font-size:11px;">GID ${escapeHtml(s.gid)}：${escapeHtml(s.reason)}</div>`).join('')}</div>`
+                    : '';
+                notify(`
+                    <div class='title' style="color:#4caf50;">📤 已推送 ${(result.added || []).length} 本到下载服务</div>
+                    <div style="font-size:12px;color:#ccc;">服务端将自动排队下载（完整性校验 + 超时重传 + 多CDN轮询）</div>
+                    ${skipped.length ? `<div style="font-size:12px;color:#ff9800;margin-top:6px;">跳过 ${skipped.length} 本：</div>${skippedHtml}` : ''}
+                `, Infinity);
             });
         }
 
@@ -693,7 +789,20 @@
                 <label>下载根目录名 (将在浏览器默认下载路径下建立此文件夹):</label>
                 <input type="text" id="nhq_path" value="${escapeHtml(DL_PATH)}" placeholder="例如填入 nHentai">
                 <div class="nhqb-helper">
-                    脚本会自动按照 <b>【根目录】/【本子名】/【GID】/【页码.后缀】</b> 的格式为您建好文件夹并归类保存。
+                    脚本会自动按照 <b>【根目录】/【本子名 [本子id]】/【页码.后缀】</b> 的格式为您建好文件夹并归类保存。
+                </div>
+            </div>
+
+            <div class="field-group">
+                <label>本地下载服务（队列下载 / Web 控制台）：</label>
+                <input type="text" id="nhq_server_url" value="${escapeHtml(SERVER_URL)}" placeholder="例如 http://127.0.0.1:8787">
+                <input type="text" id="nhq_server_key" value="${escapeHtml(SERVER_KEY)}" placeholder="API Key（服务启动日志或 data/INITIAL_API_KEY.txt）" style="margin-top:8px;">
+                <div class="nhqb-helper">
+                    勾选本子后点「📤 推送到下载服务」即进入服务端队列：自动排队下载 + 完整性校验 + 超时重传 + 多CDN轮询 + WebP统一 + 间隔限速。
+                </div>
+                <div style="display:flex; gap:10px; margin-top:10px;">
+                    <button id="nhq_test_server" class="btn btn-secondary" style="flex:1;">🔌 测试连接</button>
+                    <button id="nhq_sync_server" class="btn btn-secondary" style="flex:1;">🔄 从服务同步已下载</button>
                 </div>
             </div>
             
@@ -713,6 +822,42 @@
         `;
 
         overlay.appendChild(modal); document.body.appendChild(overlay);
+
+        modal.querySelector('#nhq_test_server').addEventListener('click', async () => {
+            const url = modal.querySelector('#nhq_server_url').value.trim().replace(/\/+$/, '');
+            const key = modal.querySelector('#nhq_server_key').value.trim();
+            const oldUrl = SERVER_URL; const oldKey = SERVER_KEY;
+            SERVER_URL = url; SERVER_KEY = key;
+            const res = await serverApi('/api/stats', 'GET');
+            SERVER_URL = oldUrl; SERVER_KEY = oldKey;
+            if (res.ok) {
+                notify(`<div class='title' style="color:#4caf50;">✓ 服务连接成功</div>版本 ${escapeHtml(res.json?.version || '-')} | 队列 ${res.json?.counts?.queued || 0} | 下载中 ${res.json?.counts?.downloading || 0}`, 6000);
+            } else {
+                notify(`<div class='title'>连接失败</div>${res.status === 401 ? 'API Key 无效' : '无法连接下载服务，请确认服务已启动且地址正确'}`, 6000);
+            }
+        });
+
+        modal.querySelector('#nhq_sync_server').addEventListener('click', async () => {
+            const url = modal.querySelector('#nhq_server_url').value.trim().replace(/\/+$/, '');
+            const key = modal.querySelector('#nhq_server_key').value.trim();
+            const oldUrl = SERVER_URL; const oldKey = SERVER_KEY;
+            SERVER_URL = url; SERVER_KEY = key;
+            const res = await serverApi('/api/tasks?status=completed', 'GET');
+            SERVER_URL = oldUrl; SERVER_KEY = oldKey;
+            if (!res.ok) {
+                notify(`<div class='title'>同步失败</div>${res.status === 401 ? 'API Key 无效' : '无法连接下载服务'}`, 6000);
+                return;
+            }
+            let added = 0;
+            for (const t of (res.json?.tasks || [])) {
+                const gid = String(t.gid);
+                if (!downloadedSet.has(gid)) { downloadedSet.add(gid); added++; }
+            }
+            localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
+            syncLocalState();
+            requestRender();
+            notify(`<div class='title' style="color:#4caf50;">同步完成</div>新增 ${added} 条已下载记录，当前共 ${downloadedSet.size} 条`, 6000);
+        });
 
         modal.querySelector('#nhq_backup').addEventListener('click', () => {
             const data = localStorage.getItem(DOWNLOADED_KEY) || '[]'; const blob = new Blob([data], { type: 'application/json' }); const url = URL.createObjectURL(blob);
@@ -744,6 +889,10 @@
         modal.querySelector('#nhq_save').addEventListener('click', () => {
             DL_PATH = modal.querySelector('#nhq_path').value.trim();
             localStorage.setItem('nh_dl_path', DL_PATH);
+            SERVER_URL = modal.querySelector('#nhq_server_url').value.trim().replace(/\/+$/, '') || 'http://127.0.0.1:8787';
+            SERVER_KEY = modal.querySelector('#nhq_server_key').value.trim();
+            localStorage.setItem('nh_server_url', SERVER_URL);
+            localStorage.setItem('nh_server_key', SERVER_KEY);
             notify(`<div class='title'>配置已保存</div>`, 3000); overlay.remove();
         });
     }

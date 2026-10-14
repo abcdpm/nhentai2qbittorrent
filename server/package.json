@@ -1,0 +1,17 @@
+{
+  "name": "nh-download-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "nHentai 本地下载服务：任务队列 / 完整性校验 / 超时重传 / 多CDN轮询 / WebP统一转换 / 请求间隔 / API Key 鉴权 / 现代化Web管理界面",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/run-tests.js"
+  },
+  "engines": {
+    "node": ">=18.17.0"
+  },
+  "optionalDependencies": {
+    "sharp": "^0.33.5"
+  }
+}

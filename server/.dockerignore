@@ -1,0 +1,13 @@
+# 构建上下文仅需要源码与 package.json
+data
+downloads
+node_modules
+test
+.git
+*.log
+*.txt
+.env
+docker-compose.yml
+build-and-push.sh
+Dockerfile
+.dockerignore
