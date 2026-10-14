@@ -148,6 +148,7 @@
                             <span>目录: <code>${esc(t.folder)}</code></span>
                             ${t.downloadedBytes ? `<span>已下载 ${formatBytes(t.downloadedBytes)}</span>` : ''}
                             ${t.convertedToWebp ? '<span>WebP ✓</span>' : ''}
+                            ${t.zipFile ? `<span>📦 ZIP ✓${t.zipBytes ? ' ' + formatBytes(t.zipBytes) : ''}</span>` : ''}
                             ${t.startedAt ? `<span>开始 ${esc(String(t.startedAt).replace('T', ' ').slice(0, 19))}</span>` : ''}
                         </div>
                     </div>
@@ -220,6 +221,8 @@
             }
             $('#set-convertToWebp').checked = !!s.convertToWebp;
             $('#set-keepOriginal').checked = !!s.keepOriginal;
+            $('#set-zipAfterVerify').checked = !!s.zipAfterVerify;
+            $('#set-keepFolderAfterZip').checked = !!s.keepFolderAfterZip;
             $('#set-preferCoverHost').checked = !!s.preferCoverHost;
             $('#set-cdnBaseUrls').value = (s.cdnBaseUrls || []).join('\n');
             $('#sharp-status').textContent = d.sharpAvailable
@@ -238,6 +241,8 @@
         }
         patch.convertToWebp = $('#set-convertToWebp').checked;
         patch.keepOriginal = $('#set-keepOriginal').checked;
+        patch.zipAfterVerify = $('#set-zipAfterVerify').checked;
+        patch.keepFolderAfterZip = $('#set-keepFolderAfterZip').checked;
         patch.preferCoverHost = $('#set-preferCoverHost').checked;
         patch.cdnBaseUrls = $('#set-cdnBaseUrls').value.split('\n').map(v => v.trim()).filter(Boolean);
         try {

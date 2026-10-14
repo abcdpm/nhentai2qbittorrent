@@ -108,6 +108,11 @@
                         <label class="field check"><input type="checkbox" id="set-keepOriginal"><span>转换后保留原始图片文件</span></label>
                         <div class="field span2"><span id="sharp-status" class="muted small"></span></div>
                     </div>
+                    <h3>压缩（完整性校验通过后）</h3>
+                    <div class="form-grid">
+                        <label class="field check"><input type="checkbox" id="set-zipAfterVerify"><span>校验通过后压缩为 zip（名称同样以 [id] 结尾，可直接导入 LANraragi）</span></label>
+                        <label class="field check"><input type="checkbox" id="set-keepFolderAfterZip"><span>压缩后保留原图片文件夹（默认删除，仅保留 zip）</span></label>
+                    </div>
                     <div class="form-actions">
                         <button id="btn-save-settings" class="btn primary">保存设置</button>
                         <span id="settings-msg" class="muted small"></span>

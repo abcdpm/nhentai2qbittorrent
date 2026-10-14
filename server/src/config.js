@@ -21,6 +21,9 @@ const DEFAULTS = {
     convertToWebp: true,        // 统一转 WebP（需要可选依赖 sharp）
     webpQuality: 82,
     keepOriginal: false,        // 转换成功后是否保留原图
+    // 压缩（完整性校验通过后打包为 zip，可直接导入 LANraragi）
+    zipAfterVerify: true,       // 校验通过后压缩为 "本子名 [id].zip"
+    keepFolderAfterZip: false,  // 压缩后是否保留原图片文件夹
     // 源站适配（高级项，一般无需修改；测试/镜像时可覆盖）
     metaUrlTemplate: 'https://nhentai.net/g/{gid}/',
     preferCoverHost: true,      // 优先用封面所在 CDN 节点

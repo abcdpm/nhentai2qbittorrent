@@ -1,8 +1,9 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { sleep, parseRetryAfter } = require('./util');
+const { sleep, parseRetryAfter, formatBytes } = require('./util');
 const { fetchGalleryMeta } = require('./nhentai');
+const { createZipFromDir, readZipEntries } = require('./zip');
 
 /**************************************************************************
  * 文件头魔数校验 —— “下载完整”的核心判定：非空 + 格式文件头匹配
@@ -322,6 +323,30 @@ class Downloader {
         task.downloadedBytes = task.pages.reduce((s, p) => s + (p.bytes || 0), 0);
         task.convertedToWebp = !!(cfg.get('convertToWebp') && this.converter.available);
         task.folderPath = dir;
+
+        // 3. 完整性校验通过后压缩为 zip（名字同样以 [id] 结尾，可直接导入 LANraragi）
+        if (task.failed === 0 && task.done > 0 && cfg.get('zipAfterVerify')) {
+            const zipName = `${task.folder}.zip`;
+            const zipPath = path.join(cfg.get('downloadDir'), zipName);
+            try {
+                const r = createZipFromDir(dir, zipPath);
+                const entries = readZipEntries(zipPath);
+                if (entries.length !== task.done) {
+                    throw new Error(`压缩包条目数不符 (${entries.length}/${task.done})`);
+                }
+                task.zipFile = zipName;
+                task.zipBytes = r.bytes;
+                log(`已压缩: ${zipName} (${formatBytes(r.bytes)}, ${r.entries} 个文件)`);
+                if (!cfg.get('keepFolderAfterZip')) {
+                    fs.rmSync(dir, { recursive: true, force: true });
+                    task.folderRemoved = true;
+                    log(`已清理原图片文件夹: ${task.folder}`);
+                }
+            } catch (e) {
+                task.zipError = e.message;
+                log(`压缩失败，保留原文件夹: ${e.message}`);
+            }
+        }
         onProgress(task);
 
         log(`结束：成功 ${task.done}/${task.total}，失败 ${task.failed}`);

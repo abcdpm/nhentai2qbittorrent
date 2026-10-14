@@ -18,6 +18,7 @@ const { QueueManager } = require('../src/queue');
 const { createHandler } = require('../src/api');
 const { parseGalleryHtml, fetchGalleryMeta } = require('../src/nhentai');
 const { galleryFolderName, sanitizeFileName } = require('../src/util');
+const { readZipEntries, extractZipEntry, crc32, numericNameCompare } = require('../src/zip');
 
 /**************************************************************************
  * mock 源站：/g/:gid/ 详情页 + /:cdn/galleries/:media/:file 图片
@@ -105,6 +106,7 @@ function makeEnv(mock, tmpName) {
     config.data.retryDelayMs = 80;
     config.data.repairRounds = 2;
     config.data.convertToWebp = false;
+    config.data.zipAfterVerify = false;
     config.data.preferCoverHost = false;
     config.data.metaUrlTemplate = `http://127.0.0.1:${mock.port}/g/{gid}/`;
     config.data.cdnBaseUrls = [`http://127.0.0.1:${mock.port}/cdn1`, `http://127.0.0.1:${mock.port}/cdn2`];
@@ -158,12 +160,27 @@ test('元数据解析：media_id / num_pages / 后缀表 / 标题 / CDN 主机',
     assert.strictEqual(meta.coverHost, 'https://i2.nhentai.net');
 });
 
-test('文件夹命名规则：本子名 [本子id]（非法字符清洗）', () => {
+test('文件夹命名规则：本子名 [本子id]（非法字符/Windows保留名/长度双平台限制）', () => {
     assert.strictEqual(galleryFolderName('[作者A] 测试本子标题', '123001'), '[作者A] 测试本子标题 [123001]');
     const name = galleryFolderName('标题/含:非法*字符?  ', '42');
     assert.strictEqual(name, '标题 含 非法 字符 [42]');
     assert.ok(!/[\\/:*?"<>|]/.test(name));
     assert.strictEqual(sanitizeFileName('  a..b  '), 'a..b');
+
+    // 超长标题（中文 300 字 = 900 字节）：截掉最后面的文字，但保留末端 [id]
+    const longName = galleryFolderName('很长的标题'.repeat(60), '123456');
+    assert.ok(Buffer.byteLength(longName, 'utf8') <= 180, `总长应 ≤180 字节, 实际 ${Buffer.byteLength(longName, 'utf8')}`);
+    assert.ok(/\ \[123456\]$/.test(longName), '必须保留末端 [id] 标记');
+    assert.ok(longName.startsWith('很长的标题'), '截断必须从标题尾部进行');
+
+    // ASCII 超长同样限字节
+    const ascii = galleryFolderName('A'.repeat(300), '1');
+    assert.ok(Buffer.byteLength(ascii, 'utf8') <= 180);
+
+    // Windows 保留设备名 / 结尾点与空格
+    assert.strictEqual(galleryFolderName('con', '1'), 'con_ [1]');
+    assert.strictEqual(galleryFolderName('NUL', '2'), 'NUL_ [2]');
+    assert.strictEqual(galleryFolderName('标题. . ', '2'), '标题 [2]');
 });
 
 test('文件头魔数校验', () => {
@@ -363,6 +380,63 @@ test('WebP 统一转换：jpg/png → webp，gif → 动态 webp（sharp 缺失�
             console.log('    [SKIP] 未安装 sharp，验证降级路径：保留原始 jpg/gif');
             assert.deepStrictEqual(files, ['1.jpg', '2.gif']);
         }
+    } finally {
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('CRC32 标准向量与 zip 条目数值排序', () => {
+    assert.strictEqual(crc32(Buffer.from('123456789', 'utf8')), 0xCBF43926);
+    assert.deepStrictEqual(['10.jpg', '2.jpg', '1.jpg'].sort(numericNameCompare), ['1.jpg', '2.jpg', '10.jpg']);
+});
+
+test('完整性校验通过后压缩 zip 并清理原文件夹', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    env.config.data.zipAfterVerify = true;
+    env.config.data.keepFolderAfterZip = false;
+    try {
+        const { added } = env.queue.enqueue([{ gid: '123001', title: '[作者A] 测试本子标题' }]);
+        env.queue.start();
+        const task = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 15000, '任务完成');
+        assert.strictEqual(task.status, 'completed');
+
+        const dl = env.config.get('downloadDir');
+        const zipPath = path.join(dl, '[作者A] 测试本子标题 [123001].zip');
+        assert.ok(fs.existsSync(zipPath), '应生成 zip 压缩包');
+        assert.ok(!fs.existsSync(path.join(dl, '[作者A] 测试本子标题 [123001]')), '默认应删除原图片文件夹');
+
+        const entries = readZipEntries(zipPath);
+        assert.deepStrictEqual(entries.map(e => e.name), ['1.jpg', '2.png', '3.webp'], '条目按页码排序');
+        const raw = extractZipEntry(zipPath, entries[0]);
+        assert.ok(sniffMagic(raw, 'jpg'), '解压内容应与源图片一致');
+        assert.strictEqual(task.zipFile, '[作者A] 测试本子标题 [123001].zip');
+    } finally {
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('keepFolderAfterZip=true 时压缩后保留原文件夹', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    env.config.data.zipAfterVerify = true;
+    env.config.data.keepFolderAfterZip = true;
+    try {
+        const { added } = env.queue.enqueue([{ gid: '123002', title: '[作者B] 旋转与重试' }]);
+        env.queue.start();
+        const task = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 15000, '任务完成');
+        assert.strictEqual(task.status, 'completed');
+        const dl = env.config.get('downloadDir');
+        assert.ok(fs.existsSync(path.join(dl, '[作者B] 旋转与重试 [123002].zip')), 'zip 应生成');
+        assert.ok(fs.existsSync(path.join(dl, '[作者B] 旋转与重试 [123002]')), '原文件夹应保留');
     } finally {
         await env.queue.stop();
         mock.close();

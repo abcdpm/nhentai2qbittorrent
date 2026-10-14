@@ -16,11 +16,11 @@
 # ==========================================================
 services:
   nh-server:
-    image: ${DOCKERHUB_USER:-llllalex}/nh-download-server:${IMAGE_TAG:-1.0.0}
+    image: llllalex/nh-download-server:latest
     container_name: nh-download-server
     restart: unless-stopped
     ports:
-      - "${NH_HOST_PORT:-8787}:8787"
+      - 10092:8787
     environment:
       # 容器内监听地址（固定 0.0.0.0 才能映射端口）
       NH_HOST: "0.0.0.0"

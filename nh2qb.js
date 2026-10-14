@@ -158,9 +158,31 @@
     }
 
     function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"})[c]); }
-    function sanitizeFileName(name) { return name.replace(/[\\/:*?"<>|]/g, ' ').replace(/\s+/g, ' ').trim().substring(0, 150).trim().replace(/[.+\-\s]+$/g, ''); }
-    /** 文件夹名格式：本子名 [本子id] */
-    function galleryFolderName(title, gid) { return `${sanitizeFileName(title) || 'untitled'} [${gid}]`; }
+    const WINDOWS_RESERVED = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
+    function utf8Len(s) { let n = 0; for (const ch of String(s)) { const c = ch.codePointAt(0); n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4; } return n; }
+    function truncateUtf8(str, maxBytes) {
+        let out = '', bytes = 0;
+        for (const ch of String(str)) {
+            const c = ch.codePointAt(0);
+            const b = c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4;
+            if (bytes + b > maxBytes) break;
+            out += ch; bytes += b;
+        }
+        return out;
+    }
+    /** 文件名清洗：Windows/Linux 双平台（非法字符/控制符/保留名/结尾点空格），可按 UTF-8 字节限长 */
+    function sanitizeFileName(name, maxBytes) {
+        let s = String(name == null ? '' : name).replace(/[\\/:*?"<>|]/g, ' ').replace(/[\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim();
+        if (maxBytes) s = truncateUtf8(s, maxBytes);
+        s = s.replace(/[.+\-\s]+$/g, '');
+        if (WINDOWS_RESERVED.test(s)) s += '_';
+        return s;
+    }
+    /** 文件夹名格式：本子名 [本子id]（整体 ≤180 UTF-8 字节，超长截掉标题尾部文字，保留末端 [id]） */
+    function galleryFolderName(title, gid) {
+        const suffix = ` [${gid}]`;
+        return `${sanitizeFileName(title, 180 - utf8Len(suffix)) || 'untitled'}${suffix}`;
+    }
 
     /**************************************************************************
      * 3.1 本地下载服务通信（队列推送）
