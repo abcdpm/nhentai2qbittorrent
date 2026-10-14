@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         nHentai → Local Image Scraper
 // @namespace    http://tampermonkey.net/
-// @version      5.2.0
-// @description  直接提取高清原图下载；「推送到下载服务」本地服务队列（完整性校验/超时重传/多CDN轮询/WebP统一转换/间隔下载/自动压缩zip）；下载完成自动标记已下载；文件夹格式：本子名 [本子id]
+// @version      5.3.0
+// @description  直接提取高清原图下载；「推送到下载服务」本地服务队列（完整性校验/超时重传/多CDN轮询/WebP统一转换/间隔下载/自动压缩zip）；自动同步浏览器Cookie解除403；下载完成自动标记已下载；文件夹格式：本子名 [本子id]
 // @author       Paccu
 // @match        https://nhentai.net/g/*
 // @match        https://nhentai.net/
@@ -16,6 +16,7 @@
 // @grant        GM_download
 // @grant        GM_addStyle
 // @grant        GM_xmlhttpRequest
+// @grant        GM_cookie
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -214,6 +215,7 @@
             showSettingsModal();
             return null;
         }
+        await syncCookieToServer(true);   // 推送前先刷新浏览器 Cookie 到服务端（解 403）
         const res = await serverApi('/api/tasks', 'POST', { items });
         if (!res.ok) {
             const reason = (res.json && res.json.error) || (res.status === 0 ? '无法连接本地下载服务（请确认已启动）' : `HTTP ${res.status}`);
@@ -241,6 +243,41 @@
             syncLocalState();
             requestRender();
         }
+    }
+
+    /**
+     * 获取 nhentai 的浏览器 Cookie：
+     * 优先 GM_cookie（Tampermonkey，可拿到 HttpOnly 的 cf_clearance），
+     * 不支持时退化为 document.cookie。
+     */
+    function getNhCookies() {
+        return new Promise((resolve) => {
+            const fromDoc = document.cookie || '';
+            if (typeof GM_cookie !== 'undefined' && GM_cookie && typeof GM_cookie.list === 'function') {
+                try {
+                    GM_cookie.list({ url: 'https://nhentai.net/' }, (cookies, error) => {
+                        if (!error && cookies && cookies.length) {
+                            resolve(cookies.map(c => `${c.name}=${c.value}`).join('; '));
+                        } else {
+                            resolve(fromDoc);
+                        }
+                    });
+                    return;
+                } catch (e) { /* fall through */ }
+            }
+            resolve(fromDoc);
+        });
+    }
+
+    /** 自动把浏览器 Cookie 同步给下载服务（解除 Cloudflare 403） */
+    async function syncCookieToServer(force = false) {
+        if (!SERVER_KEY) return;
+        const cookie = await getNhCookies();
+        if (!cookie) return;
+        const last = localStorage.getItem('nh_last_cookie') || '';
+        if (!force && last === cookie) return;   // 无变化则不重复上传
+        const res = await serverApi('/api/cookie', 'POST', { cookie });
+        if (res.ok) localStorage.setItem('nh_last_cookie', cookie);
     }
 
     /**************************************************************************
@@ -399,7 +436,7 @@
         if (!panel) {
             panel = document.createElement('div');
             panel.id = 'nhqb_detail_panel';
-            panel.style.cssText = 'position:fixed;bottom:20px;right:90px;z-index:99999;display:flex;flex-direction:row;gap:8px;';
+            panel.style.cssText = 'position:fixed;bottom:20px;right:70px;z-index:99999;display:flex;flex-direction:row;gap:8px;';
             document.body.appendChild(panel);
         }
         let btn = panel.querySelector('.nh-custom-btn-single');
@@ -428,7 +465,7 @@
         panel.appendChild(btn);
 
         const pushBtn = document.createElement('button');
-        pushBtn.className = 'btn btn-primary nh-custom-btn-push';
+        pushBtn.className = 'btn btn-success nh-custom-btn-push';
         pushBtn.innerText = '推送到下载服务';
         panel.appendChild(pushBtn);
         pushBtn.addEventListener('click', async () => {
@@ -682,9 +719,9 @@
         if (!document.getElementById('nhqb_right_panel')) {
             const rightPanel = document.createElement('div');
             rightPanel.id = 'nhqb_right_panel';
-            rightPanel.style.cssText = 'position:fixed;bottom:20px;right:90px;z-index:99999;display:flex;flex-direction:row;gap:8px;';
+            rightPanel.style.cssText = 'position:fixed;bottom:20px;right:70px;z-index:99999;display:flex;flex-direction:row;gap:8px;';
             rightPanel.innerHTML = `
-                <button id="nhqb_push_btn" class="btn btn-primary">推送到下载服务</button>
+                <button id="nhqb_push_btn" class="btn btn-success">推送到下载服务</button>
                 <button id="nhqb_batch_btn" class="btn btn-primary">批量下载到本地</button>
             `;
             document.body.appendChild(rightPanel);
@@ -1049,7 +1086,9 @@
         }
     }
 
-    // 自动同步下载服务的完成状态（下载+完整性校验通过 → 自动标记已下载）
+    // 自动同步：浏览器 Cookie（解除 Cloudflare 403）+ 下载服务完成状态（自动标记已下载）
+    setTimeout(() => syncCookieToServer(true), 2500);
+    setInterval(() => syncCookieToServer(false), 60000);
     setTimeout(syncDownloadedFromServer, 3000);
     setInterval(syncDownloadedFromServer, 60000);
 

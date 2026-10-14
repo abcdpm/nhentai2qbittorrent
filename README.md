@@ -8,7 +8,7 @@
 | --- | --- |
 | `nh2qb.js` | 油猴脚本：勾选本子 → 推送到本地服务队列 / 浏览器直接下载原图 |
 | `server/` | 本地 Web 下载服务：任务队列 + 现代化管理界面 + API Key 鉴权 |
-| `lanraragi/` | LANraragi 元数据插件：按压缩包末端 `[id]` / 名称三级回退抓取 nHentai 元数据 |
+| `lanraragi-plugin/` | LANraragi 元数据插件：按压缩包末端 `[id]` / 名称三级回退抓取 nHentai 元数据 |
 
 ## 本地下载服务（server/）
 
@@ -53,7 +53,7 @@ docker compose up -d                          # 本机刚推送过则直接运�
 - **完整性校验**：每本下载完成后校验页数 + 文件头魔数（jpg/png/gif/webp），缺损自动进入补齐轮重传
 - **超时重传**：单次请求超时自动重试（`timeoutMs`）
 - **多 CDN 轮询**：每轮把所有 CDN 节点轮询一遍（i.nhentai.net / i1 / i2 / i3 / i5 / i7…），失败自动换节点；429 限流自动退避
-- **元数据双源 + 403 解法**：优先抓详情页 HTML，被 Cloudflare **403** 拦截时自动回退官方 JSON API 备用源；仍 403 时在 Web 设置 → 高级填入**浏览器 Cookie**（`nhCookie`）即可解除（错误提示中也会引导）
+- **元数据双源 + 403 解法**：优先抓详情页 HTML，被 Cloudflare **403** 拦截时自动回退官方 JSON API 备用源；**油猴脚本会自动把浏览器 Cookie 同步给服务端**（含 HttpOnly 的 `cf_clearance`），通常无需手动配置；也可在 Web 设置 → 高级手动填「浏览器 Cookie」（`nhCookie`）
 - **多图片格式**：webp / jpg / png / gif 全支持；开启“统一 WebP”后 jpg、png → webp，**gif → 动态 WebP（保留动画）**
   - 未安装 `sharp` 时自动降级为保留原格式（不会失败）
 - **间隔下载**：`requestIntervalMs` 图片请求间隔（防限流）+ `galleryIntervalMs` 任务间隔
@@ -77,15 +77,21 @@ POST   /api/queue/pause|resume|retry-failed
 GET/PUT /api/settings                 GET/POST /api/keys     DELETE /api/keys/:id
 ```
 
-## 油猴脚本（nh2qb.js）v5.2.0
+## 油猴脚本（nh2qb.js）v5.3.0
 
-- 列表页：右下角「推送到下载服务」「批量下载到本地」按钮组；左下角「全选中文本子 / 取消全部选中」
-- 详情页：右下角「提取原图下载」「推送到下载服务」按钮组（推送按钮与提取按钮同款样式）
+- 列表页：右下角「推送到下载服务」（绿色）「批量下载到本地」按钮组，紧邻右侧「设置」按钮；左下角「全选中文本子 / 取消全部选中」
+- 详情页：右下角「提取原图下载」「推送到下载服务」（绿色）按钮组
+- **自动同步浏览器 Cookie**：脚本自动抓取 nhentai 的 Cookie（`GM_cookie` 可拿 HttpOnly 的 `cf_clearance`）通过 `POST /api/cookie` 传给下载服务解除 403；页面加载后与每 60s 自动同步，推送前强制刷新
 - 设置：下载根目录、本地服务地址 + API Key、🔌 测试连接、🔄 从服务同步已下载记录、历史记录备份/恢复
 - **自动标记已下载**：下载服务完成下载 + 完整性校验通过后，页面自动标记「已下载」（角标 + 封面变暗 + 取消勾选，与本地下载一致，每 60s 自动同步）
 - 与服务端一致的文件夹格式：`【根目录】/【本子名 [本子id]】/【页码.后缀】`
 
 ## 更新日志
+
+### v5.3.0
+- 油猴脚本**自动获取浏览器 Cookie 并同步给下载服务**（新增 `POST /api/cookie` 接口）：优先 `GM_cookie` 拿 HttpOnly 的 `cf_clearance`，推送前强制刷新、每 60s 自动同步——彻底解决「元数据 HTTP 403」
+- 「推送到下载服务」按钮改为绿色，右下角按钮组与「设置」按钮间距收紧
+- `/api/stats` 新增 `cookieSet` 状态
 
 ### v5.2.0
 - 修复推送任务「元数据 HTTP 403」：详情页被拦时自动回退官方 JSON API 备用源；新增 `nhCookie` 配置（填浏览器 Cookie 解 Cloudflare 拦截），请求头补全为浏览器风格；403 时错误信息给出明确排障引导
@@ -96,7 +102,7 @@ GET/PUT /api/settings                 GET/POST /api/keys     DELETE /api/keys/:i
 ### v5.1.0
 - 文件夹命名适配 Windows/Linux 限制：非法字符/保留设备名/结尾点空格清洗，超长按 UTF-8 字节截掉标题尾部文字（保留末端 `[id]`），整体 ≤180 字节
 - 完整性校验通过后自动压缩为 `本子名 [本子id].zip`（零依赖 deflate，条目按页码排序，默认清理原文件夹，可设置保留）
-- 新增 LANraragi 元数据插件（`lanraragi/NHentaiByTitleID.pm`，**单个 .pm 文件自包含**，内嵌自检）：① 优先识别压缩包末端 `[id]` 按 ID 抓取 → ② 无 `[id]` 按名称搜索 → ③ 有 `[id]` 但抓不到时去掉 `[id]` 按名称搜索
+- 新增 LANraragi 元数据插件（`lanraragi-plugin/NHentaiByTitleID.pm`，**单个 .pm 文件自包含**，内嵌自检）：① 优先识别压缩包末端 `[id]` 按 ID 抓取 → ② 无 `[id]` 按名称搜索 → ③ 有 `[id]` 但抓不到时去掉 `[id]` 按名称搜索
 
 ### v5.0.0
 - 新增本地 Web 下载服务（server/）：任务队列、完整性校验、超时重传、多 CDN 轮询、WebP 统一转换（gif → 动态 webp）、请求/任务间隔

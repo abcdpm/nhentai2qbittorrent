@@ -589,6 +589,50 @@ test('HTTP API：鉴权 / 入队 / 去重 / 密钥管理 / 设置校验', async 
     }
 });
 
+test('POST /api/cookie：脚本自动同步浏览器 Cookie（解 403）', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    const keys = new KeyStore(env.tmp, env.logger);
+    const created = keys.create('测试密钥');
+    const handler = createHandler({
+        config: env.config, store: env.store, keys, queue: env.queue,
+        logger: env.logger, downloader: env.downloader
+    });
+    const server = http.createServer((req, res) => handler(req, res).catch(() => { res.writeHead(500); res.end(); }));
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const call = async (p, method, body) => {
+        const res = await fetch(base + p, {
+            method: method || 'GET',
+            headers: Object.assign({ 'X-API-Key': created.raw }, body ? { 'Content-Type': 'application/json' } : {}),
+            body: body ? JSON.stringify(body) : undefined
+        });
+        return { status: res.status, data: await res.json().catch(() => ({})) };
+    };
+    try {
+        let r = await call('/api/cookie', 'POST', { cookie: 'cf_clearance=xyz; session=abc' });
+        assert.strictEqual(r.status, 200);
+        assert.strictEqual(env.config.get('nhCookie'), 'cf_clearance=xyz; session=abc', 'Cookie 应保存到 nhCookie');
+
+        r = await call('/api/stats');
+        assert.strictEqual(r.data.cookieSet, true, 'stats 应报告 cookieSet=true');
+
+        r = await call('/api/cookie', 'POST', { cookie: '' });
+        assert.strictEqual(r.status, 400, '空 cookie 应被拒绝');
+
+        const noKey = await fetch(base + '/api/cookie', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ cookie: 'x=1' })
+        });
+        assert.strictEqual(noKey.status, 401, '无密钥不得写入 Cookie');
+    } finally {
+        server.close();
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
 test('Web 界面与静态资源可访问（无需密钥）', async () => {
     const mock = await createMockSite(GALLERY_1);
     const env = makeEnv(mock);

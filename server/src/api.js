@@ -119,6 +119,7 @@ function createHandler(ctx) {
                     paused: queue.paused,
                     currentTaskId: queue.current,
                     sharpAvailable: downloader.converter._load(),
+                    cookieSet: !!config.get('nhCookie'),
                     downloadDir: config.get('downloadDir'),
                     keyName: keyInfo.name
                 });
@@ -190,6 +191,25 @@ function createHandler(ctx) {
             }
             if (pathname === '/api/queue/retry-failed' && method === 'POST') {
                 sendJson(res, 200, queue.retryFailed());
+                return;
+            }
+
+            // ---- Cookie 同步（油猴脚本自动上传浏览器 Cookie，解除 Cloudflare 403）----
+            if (pathname === '/api/cookie' && method === 'POST') {
+                const body = await readBody(req);
+                const cookie = String(body.cookie || '').trim();
+                if (!cookie) {
+                    sendJson(res, 400, { ok: false, error: 'cookie 为空' });
+                    return;
+                }
+                if (cookie.length > 8192) {
+                    sendJson(res, 400, { ok: false, error: 'cookie 过长' });
+                    return;
+                }
+                const r = config.update({ nhCookie: cookie });
+                if (!r.ok) { sendJson(res, 400, { ok: false, error: r.errors.join('；') }); return; }
+                logger.info('浏览器 Cookie 已同步（将用于元数据/图片请求；内容不记录日志）');
+                sendJson(res, 200, { ok: true });
                 return;
             }
 
