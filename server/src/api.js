@@ -3,7 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { parse } = require('url');
 
-const VERSION = '1.0.0';
+const VERSION = process.env.APP_VERSION || (() => { try { return require('../package.json').version; } catch (e) { return 'dev'; } })();
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MIME = {
     '.html': 'text/html; charset=utf-8',
@@ -79,7 +79,24 @@ function serveStatic(res, pathname) {
  * 所有 /api/* 均需 X-API-Key 鉴权（避免公网骚扰）。
  */
 function createHandler(ctx) {
-    const { config, store, keys, queue, logger, downloader } = ctx;
+    const { config, store, keys, queue, logger, downloader, state } = ctx;
+
+    /** 历史下载记录：云端清单 ∪ 服务端已完成任务，尽量补全标题 */
+    function historyData() {
+        const s = state.get();
+        const titles = {};
+        for (const t of store.list()) {
+            if (t.title && !titles[String(t.gid)]) titles[String(t.gid)] = t.title;
+        }
+        for (const [g, t] of Object.entries(s.checked)) {
+            if (t && !titles[String(g)]) titles[String(g)] = String(t);
+        }
+        const set = new Set(s.downloadedGids);
+        for (const t of store.list({ status: 'completed' })) set.add(String(t.gid));
+        const gids = [...set].sort((a, b) => Number(b) - Number(a));
+        const entries = gids.map(g => ({ gid: g, title: titles[g] || '' }));
+        return { total: gids.length, gids, entries };
+    }
 
     return async function handler(req, res) {
         const parsed = parse(req.url, true);
@@ -210,6 +227,70 @@ function createHandler(ctx) {
                 if (!r.ok) { sendJson(res, 400, { ok: false, error: r.errors.join('；') }); return; }
                 logger.info('浏览器 Cookie 已同步（将用于元数据/图片请求；内容不记录日志）');
                 sendJson(res, 200, { ok: true });
+                return;
+            }
+
+            // ---- 队列：清空已下载（仅移除任务记录，磁盘文件保留）----
+            if (pathname === '/api/queue/clear-completed' && method === 'POST') {
+                let removed = 0;
+                for (const t of store.list({ status: 'completed' })) {
+                    if (store.remove(t.id)) removed++;
+                }
+                logger.info(`已清空 ${removed} 条已下载任务记录（磁盘文件保留）`);
+                sendJson(res, 200, { ok: true, removed, counts: store.counts() });
+                return;
+            }
+
+            // ---- 历史下载记录 ----
+            if (pathname === '/api/history' && method === 'GET') {
+                sendJson(res, 200, { ok: true, ...historyData() });
+                return;
+            }
+            if (pathname === '/api/history/export' && method === 'GET') {
+                const body = JSON.stringify(historyData().gids);
+                const dateStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+                res.writeHead(200, {
+                    'Content-Type': 'application/json; charset=utf-8',
+                    'Content-Disposition': `attachment; filename="nh_downloaded_history_${dateStr}.json"`,
+                    'Content-Length': Buffer.byteLength(body),
+                    'Access-Control-Allow-Origin': '*',
+                    'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, Authorization',
+                    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS'
+                });
+                res.end(body);
+                return;
+            }
+            if (pathname === '/api/history/import' && method === 'POST') {
+                const body = await readBody(req);
+                // 兼容：纯数组 / {gids:[...]} / 油猴备份格式
+                const gids = Array.isArray(body) ? body
+                    : (Array.isArray(body.gids) ? body.gids : null);
+                if (!gids) {
+                    sendJson(res, 400, { ok: false, error: '需要 JSON 数组 ["gid",...] 或 {"gids":[...]}' });
+                    return;
+                }
+                const before = new Set(state.get().downloadedGids);
+                const merged = state.merge({ downloadedGids: gids.map(String) });
+                const added = merged.downloadedGids.filter(g => !before.has(g)).length;
+                logger.info(`历史记录导入：新增 ${added} 条，当前共 ${merged.downloadedGids.length} 条`);
+                sendJson(res, 200, { ok: true, added, total: merged.downloadedGids.length });
+                return;
+            }
+
+            // ---- 前端状态云端持久化（nh_qb_* 字段主存储）----
+            if (pathname === '/api/state' && method === 'GET') {
+                const s = state.get();
+                // 已下载清单 = 云端状态 ∪ 服务端已完成任务
+                const set = new Set(s.downloadedGids);
+                for (const t of store.list({ status: 'completed' })) set.add(String(t.gid));
+                s.downloadedGids = [...set];
+                sendJson(res, 200, { ok: true, state: s });
+                return;
+            }
+            if (pathname === '/api/state' && method === 'PUT') {
+                const body = await readBody(req);
+                const merged = state.merge(body.state || body);
+                sendJson(res, 200, { ok: true, state: merged });
                 return;
             }
 

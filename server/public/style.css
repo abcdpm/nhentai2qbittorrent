@@ -135,6 +135,16 @@ code {
 .chip-btn:hover { color: var(--text); border-color: #3d4454; }
 .chip-btn.active { background: rgba(237, 37, 83, .18); color: #fff; border-color: rgba(237, 37, 83, .5); }
 
+.chip-count {
+    background: rgba(255, 255, 255, .12); border-radius: 999px;
+    padding: 1px 9px; margin-left: 6px; font-weight: 700; color: var(--text); font-size: 11.5px;
+}
+
+.pager {
+    display: flex; align-items: center; justify-content: center; gap: 14px;
+    margin-top: 18px; flex-wrap: wrap;
+}
+
 .task-list { display: flex; flex-direction: column; gap: 12px; }
 .task {
     background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);

@@ -34,4 +34,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD node -e "fetch('http://127.0.0.1:'+process.env.NH_PORT+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
 # 入口脚本支持 PUID/PGID（linuxserver.io 风格）：指定下载文件/配置的宿主归属并降权运行
+# APP_VERSION 在构建时由 build-and-push.sh 传入（与镜像标签一致），Web 界面左下角展示
+ARG APP_VERSION=dev
+ENV APP_VERSION=$APP_VERSION
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

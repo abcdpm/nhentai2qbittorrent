@@ -19,6 +19,7 @@ const { createHandler } = require('../src/api');
 const { parseGalleryHtml, parseGalleryApi, fetchGalleryMeta } = require('../src/nhentai');
 const { galleryFolderName, sanitizeFileName } = require('../src/util');
 const { readZipEntries, extractZipEntry, crc32, numericNameCompare } = require('../src/zip');
+const { StateStore } = require('../src/state');
 
 /**************************************************************************
  * mock 源站：/g/:gid/ 详情页 + /:cdn/galleries/:media/:file 图片
@@ -703,6 +704,131 @@ test('POST /api/cookie：脚本自动同步浏览器 Cookie（解 403）', async
             body: JSON.stringify({ cookie: 'x=1' })
         });
         assert.strictEqual(noKey.status, 401, '无密钥不得写入 Cookie');
+    } finally {
+        server.close();
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('GET/PUT /api/state：前端状态云端持久化（并集 + 快照替换 + 鉴权）', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    const keys = new KeyStore(env.tmp, env.logger);
+    const created = keys.create('测试密钥');
+    const state = new StateStore(env.tmp);
+    const handler = createHandler({
+        config: env.config, store: env.store, keys, queue: env.queue,
+        logger: env.logger, downloader: env.downloader, state
+    });
+    const server = http.createServer((req, res) => handler(req, res).catch(() => { res.writeHead(500); res.end(); }));
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const call = async (p, method, body) => {
+        const res = await fetch(base + p, {
+            method: method || 'GET',
+            headers: Object.assign({ 'X-API-Key': created.raw }, body ? { 'Content-Type': 'application/json' } : {}),
+            body: body ? JSON.stringify(body) : undefined
+        });
+        return { status: res.status, data: await res.json().catch(() => ({})) };
+    };
+    try {
+        // 上传浏览器状态（含非法 gid 应被过滤）
+        let r = await call('/api/state', 'PUT', { state: {
+            downloadedGids: ['111', '222', 'abc'],
+            checked: { '333': '标题A', '444': '标题B' },
+            downloadingGids: ['555'],
+            pushedGids: { '555': 1700000000000 }
+        } });
+        assert.strictEqual(r.status, 200);
+        assert.deepStrictEqual([...r.data.state.downloadedGids].sort(), ['111', '222'], '非法 gid 应过滤');
+        assert.strictEqual(r.data.state.checked['333'], '标题A');
+
+        // 快照替换：取消勾选 444 应同步移除
+        r = await call('/api/state', 'PUT', { state: { checked: { '333': '标题A' } } });
+        assert.deepStrictEqual(Object.keys(r.data.state.checked), ['333'], '勾选状态快照替换');
+
+        // 并集：已下载清单不回退
+        r = await call('/api/state', 'PUT', { state: { downloadedGids: ['666'] } });
+        assert.deepStrictEqual([...r.data.state.downloadedGids].sort(), ['111', '222', '666'], '已下载并集合并');
+
+        // GET 应合并服务端已完成任务的 gid
+        env.store.add({ id: 'fake-done', gid: '999', status: 'completed', title: 't', folder: 'f', pages: [], createdAt: '2026-01-01T00:00:00Z' });
+        r = await call('/api/state', 'GET');
+        assert.ok(r.data.state.downloadedGids.includes('999'), 'GET 应包含已完成任务');
+        assert.ok(r.data.state.downloadedGids.includes('666'), 'GET 应包含云端清单');
+
+        // 无密钥不得读写
+        const noKey = await fetch(base + '/api/state', {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: '{}'
+        });
+        assert.strictEqual(noKey.status, 401);
+    } finally {
+        server.close();
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('POST /api/queue/clear-completed：清空已下载记录（磁盘保留）+ 历史记录备份/导入', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    const keys = new KeyStore(env.tmp, env.logger);
+    const created = keys.create('测试密钥');
+    const state = new StateStore(env.tmp);
+    const handler = createHandler({
+        config: env.config, store: env.store, keys, queue: env.queue,
+        logger: env.logger, downloader: env.downloader, state
+    });
+    const server = http.createServer((req, res) => handler(req, res).catch(() => { res.writeHead(500); res.end(); }));
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const call = async (p, method, body) => {
+        const res = await fetch(base + p, {
+            method: method || 'GET',
+            headers: Object.assign({ 'X-API-Key': created.raw }, body ? { 'Content-Type': 'application/json' } : {}),
+            body: body ? JSON.stringify(body) : undefined
+        });
+        return { status: res.status, data: await res.json().catch(() => ({})) };
+    };
+    try {
+        // 造两条已完成 + 一条排队中的任务
+        env.store.add({ id: 'd1', gid: '111', status: 'completed', title: '本子A', folder: 'f', pages: [], createdAt: '2026-01-01T00:00:00Z' });
+        env.store.add({ id: 'd2', gid: '222', status: 'completed', title: '本子B', folder: 'f', pages: [], createdAt: '2026-01-02T00:00:00Z' });
+        env.store.add({ id: 'q1', gid: '333', status: 'queued', title: '本子C', folder: 'f', pages: [], createdAt: '2026-01-03T00:00:00Z' });
+
+        // 历史记录导入（油猴备份格式：纯数组 / 对象格式）
+        let r = await call('/api/history/import', 'POST', ['444', '555', '444']);
+        assert.strictEqual(r.data.added, 2, '去重后新增 2 条');
+        r = await call('/api/history/import', 'POST', { gids: ['666'] });
+        assert.strictEqual(r.data.added, 1, '对象格式 {gids:[...]} 亦可导入');
+
+        // 历史列表：云端清单 ∪ 已完成任务；标题从任务记录补全
+        r = await call('/api/history');
+        const gids = r.data.entries.map(e => e.gid);
+        for (const g of ['444', '555', '666', '111', '222']) assert.ok(gids.includes(g), `历史应含 ${g}`);
+        assert.ok(!gids.includes('333'), '排队中的任务不算历史下载');
+        const e111 = r.data.entries.find(e => e.gid === '111');
+        assert.strictEqual(e111.title, '本子A', '标题应从任务记录补全');
+
+        // 导出为与前端一致的 JSON 数组
+        const res2 = await fetch(base + '/api/history/export', { headers: { 'X-API-Key': created.raw } });
+        assert.strictEqual(res2.status, 200);
+        assert.ok(/attachment/.test(res2.headers.get('content-disposition') || ''), '导出应为附件下载');
+        const arr = await res2.json();
+        assert.ok(Array.isArray(arr) && arr.includes('444') && arr.includes('111'), '导出为 gid 数组');
+
+        // 清空已下载：仅移除 completed 任务记录（磁盘保留）
+        r = await call('/api/queue/clear-completed', 'POST');
+        assert.strictEqual(r.status, 200);
+        assert.strictEqual(r.data.removed, 2);
+        assert.strictEqual(env.store.list({ status: 'completed' }).length, 0);
+        assert.strictEqual(env.store.list({ status: 'queued' }).length, 1, '排队中的任务应保留');
+
+        // 清空后：云端导入的历史记录仍然保留
+        r = await call('/api/history');
+        const gids2 = r.data.entries.map(e => e.gid);
+        for (const g of ['444', '555', '666']) assert.ok(gids2.includes(g), `清空后云端历史应保留 ${g}`);
     } finally {
         server.close();
         await env.queue.stop();

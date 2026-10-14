@@ -46,7 +46,7 @@ PLATFORM_ARGS=""
 
 echo "==> 构建镜像: $IMAGE:$TAG 与 $IMAGE:latest"
 # shellcheck disable=SC2086
-docker build $PLATFORM_ARGS -t "$IMAGE:$TAG" -t "$IMAGE:latest" .
+docker build $PLATFORM_ARGS --build-arg APP_VERSION="$TAG" -t "$IMAGE:$TAG" -t "$IMAGE:latest" .
 
 # 未登录 Docker Hub 时先登录（config.json 中无 docker.io 记录视为未登录）
 if ! grep -q "index.docker.io" "$HOME/.docker/config.json" 2>/dev/null; then

@@ -18,6 +18,7 @@ const { KeyStore } = require('./src/keys');
 const { TaskStore } = require('./src/store');
 const { Downloader } = require('./src/downloader');
 const { QueueManager } = require('./src/queue');
+const { StateStore } = require('./src/state');
 const { createHandler } = require('./src/api');
 
 const ROOT = __dirname;
@@ -54,7 +55,8 @@ function bootstrap() {
     const queue = new QueueManager(store, config, logger, downloader);
     queue.start();
 
-    const handler = createHandler({ config, store, keys, queue, logger, downloader });
+    const state = new StateStore(DATA_DIR);
+    const handler = createHandler({ config, store, keys, queue, logger, downloader, state });
     const server = http.createServer((req, res) => {
         handler(req, res).catch(e => {
             logger.error(`未捕获的请求异常: ${e.message}`);

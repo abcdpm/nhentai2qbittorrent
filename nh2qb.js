@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nHentai → Local Image Scraper
 // @namespace    http://tampermonkey.net/
-// @version      5.6.0
+// @version      5.7.0
 // @description  直接提取高清原图下载；「推送到下载服务」自动附带元数据（media_id/Pages数），服务端纯CDN下载避开官方API限流；完整性校验/超时重传/多CDN轮询/WebP统一/自动压缩zip；下载完成自动标记已下载；文件夹格式：本子名 [本子id]
 // @author       Paccu
 // @match        https://nhentai.net/g/*
@@ -111,7 +111,7 @@
             }
         }
         if (needsUpdate) {
-            localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+            persistLocalState();
         }
     }
 
@@ -266,7 +266,7 @@
                 downloadingSet.add(String(it.gid));
             }
             localStorage.setItem('nh_pushed_gids', JSON.stringify(pushed));
-            localStorage.setItem(DOWNLOADING_KEY, JSON.stringify([...downloadingSet]));
+            persistLocalState();
             requestRender();
         }
         return res.json;
@@ -320,9 +320,8 @@
         }
 
         if (changed) {
-            localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
-            localStorage.setItem(DOWNLOADING_KEY, JSON.stringify([...downloadingSet]));
             localStorage.setItem('nh_pushed_gids', JSON.stringify(pushedMap));
+            persistLocalState();
             syncLocalState();
             requestRender();
         }
@@ -340,6 +339,38 @@
     /** 本浏览器推送过、尚未标记完成的任务清单 {gid: 推送时间戳} */
     function readPushedMap() {
         try { return JSON.parse(localStorage.getItem('nh_pushed_gids') || '{}') || {}; } catch (e) { return {}; }
+    }
+
+    /**
+     * 统一持久化：nh_qb_downloaded_gids 等字段以下载服务为主存储（云端持久化），
+     * 浏览器 localStorage 仅作缓存；变更后自动（防抖 2s）上传到服务端。
+     */
+    function persistLocalState() {
+        localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+        localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
+        localStorage.setItem(DOWNLOADING_KEY, JSON.stringify([...downloadingSet]));
+        localStorage.setItem('nh_pushed_gids', JSON.stringify(readPushedMap()));
+        scheduleStateUpload();
+    }
+
+    let stateUploadTimer = null;
+    function scheduleStateUpload() {
+        if (!SERVER_KEY) return;
+        clearTimeout(stateUploadTimer);
+        stateUploadTimer = setTimeout(pushStateToServer, 2000);
+    }
+
+    /** 把浏览器状态上传到下载服务（云端为主存储） */
+    async function pushStateToServer() {
+        if (!SERVER_KEY) return;
+        await serverApi('/api/state', 'PUT', {
+            state: {
+                downloadedGids: [...downloadedSet],
+                checked: savedChecked,
+                downloadingGids: [...downloadingSet],
+                pushedGids: readPushedMap()
+            }
+        });
     }
 
     /**
@@ -614,7 +645,7 @@
             if (result.ok) {
                 notify(`<div class='title' style="font-size:15px; color:#4caf50;">✓ 本子下载完成</div>成功下载 ${result.success} 张，失败 <span style="color:${result.failed > 0 ? '#ff8b8b' : '#fff'}">${result.failed}</span> 张`, Infinity);
                 downloadedSet.add(gid); 
-                localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
+                persistLocalState();
                 syncLocalState();
                 requestRender();
             } else {
@@ -692,8 +723,7 @@
                 const inputCb = document.querySelector(`input[data-gid="${gid}"]`);
                 if (inputCb) inputCb.checked = false;
                 
-                localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
-                localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
+                persistLocalState();
                 syncLocalState();
                 requestRender();
             } else {
@@ -830,7 +860,7 @@
                     const isChinese = thumb.classList.contains('lang-cn') || title.includes('[Chinese]') || title.includes('汉化');
                     if (isChinese && !isDownloaded && !cb.checked) { cb.checked = true; savedChecked[gid] = title; count++; }
                 });
-                localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+                persistLocalState();
                 if (count > 0) notify(`<div class='title'>全选完成</div>已自动选中本页 ${count} 个未下载的中文本子`, 5000);
                 else notify(`<div class='title'>全选提示</div>当前页面没有找到需要勾选的中文本子`, 5000);
             });
@@ -843,7 +873,7 @@
                     const gid = String(cb.dataset.gid);
                     if (cb.checked) { cb.checked = false; delete savedChecked[gid]; count++; }
                 });
-                localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+                persistLocalState();
                 if (count > 0) notify(`<div class='title'>取消选中</div>已清空本页 ${count} 个选中状态`, 5000);
             });
 
@@ -855,8 +885,8 @@
             rightPanel.id = 'nhqb_right_panel';
             rightPanel.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:99999;display:flex;flex-direction:row;gap:8px;';
             rightPanel.innerHTML = `
-                <button id="nhqb_push_btn" class="btn btn-success">推送到下载服务</button>
                 <button id="nhqb_batch_btn" class="btn btn-primary">批量下载到本地</button>
+                <button id="nhqb_push_btn" class="btn btn-success">推送到下载服务</button>
                 <button id="nhqb_settings" class="btn btn-primary">设置</button>
             `;
             document.body.appendChild(rightPanel);
@@ -880,7 +910,7 @@
                     const cb = document.querySelector(`input[data-gid="${it.gid}"]`);
                     if (cb) cb.checked = false;
                 }
-                localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+                persistLocalState();
 
                 const skipped = result.skipped || [];
                 const skippedHtml = skipped.length
@@ -904,7 +934,7 @@
                 });
 
                 if (checked.length === 0) {
-                    localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+                    persistLocalState();
                     return;
                 }
 
@@ -954,7 +984,7 @@
             if (savedChecked[gid]) cb.checked = true;
             cb.addEventListener('change', () => {
                 if (cb.checked) savedChecked[gid] = title; else delete savedChecked[gid];
-                localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+                persistLocalState();
             });
 
             const cover = thumb.querySelector('.cover');
@@ -997,7 +1027,7 @@
                 </div>
                 <div style="display:flex; gap:10px; margin-top:10px;">
                     <button id="nhq_test_server" class="btn btn-secondary" style="flex:1;">🔌 测试连接</button>
-                    <button id="nhq_sync_server" class="btn btn-secondary" style="flex:1;">🔄 从服务同步已下载</button>
+                    <button id="nhq_sync_server" class="btn btn-secondary" style="flex:1;">🔄 从服务同步状态</button>
                 </div>
             </div>
             
@@ -1037,21 +1067,30 @@
             const key = modal.querySelector('#nhq_server_key').value.trim();
             const oldUrl = SERVER_URL; const oldKey = SERVER_KEY;
             SERVER_URL = url; SERVER_KEY = key;
-            const res = await serverApi('/api/tasks?status=completed', 'GET');
+            const res = await serverApi('/api/state', 'GET');
             SERVER_URL = oldUrl; SERVER_KEY = oldKey;
             if (!res.ok) {
                 notify(`<div class='title'>同步失败</div>${res.status === 401 ? 'API Key 无效' : '无法连接下载服务'}`, 6000);
                 return;
             }
-            let added = 0;
-            for (const t of (res.json?.tasks || [])) {
-                const gid = String(t.gid);
-                if (!downloadedSet.has(gid)) { downloadedSet.add(gid); added++; }
-            }
-            localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
+            const s = (res.json && res.json.state) || {};
+
+            // ① 已下载清单（并集；服务端已含所有已完成任务）
+            for (const gid of (s.downloadedGids || [])) downloadedSet.add(String(gid));
+            // ② 勾选状态（云端为准，快照覆盖，支持跨浏览器恢复勾选）
+            savedChecked = Object.assign({}, s.checked || {});
+            // ③ 下载中标记
+            downloadingSet = new Set((s.downloadingGids || []).map(String));
+            // ④ 推送清单
+            localStorage.setItem('nh_pushed_gids', JSON.stringify(s.pushedGids || {}));
+
+            persistLocalState();
             syncLocalState();
             requestRender();
-            notify(`<div class='title' style="color:#4caf50;">同步完成</div>新增 ${added} 条已下载记录，当前共 ${downloadedSet.size} 条`, 6000);
+            notify(`
+                <div class='title' style="color:#4caf50;">🔄 状态同步完成（云端 → 浏览器）</div>
+                <div style="font-size:12px;color:#ccc;">已下载 ${downloadedSet.size} 条 · 勾选 ${Object.keys(savedChecked).length} 条 · 下载中 ${downloadingSet.size} 条</div>
+            `, 6000);
         });
 
         modal.querySelector('#nhq_backup').addEventListener('click', () => {
@@ -1071,7 +1110,7 @@
                     const importedData = JSON.parse(event.target.result); if (!Array.isArray(importedData)) throw new Error('文件格式不正确，必须是数组');
                     let addedCount = 0;
                     importedData.forEach(gid => { if (!downloadedSet.has(String(gid))) { downloadedSet.add(String(gid)); addedCount++; } });
-                    localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
+                    persistLocalState();
                     notify(`<div class='title'>恢复成功</div>成功导入 ${addedCount} 条新记录<br>当前总记录：${downloadedSet.size}`, 5000);
                     syncLocalState(); requestRender();
                 } catch (err) { console.error(err); notify(`<div class='title'>导入失败</div>文件格式错误或已损坏`, 4000); }

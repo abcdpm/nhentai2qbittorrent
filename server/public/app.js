@@ -13,17 +13,26 @@
         paused: false,
         logSeq: 0,
         filter: '',
+        page: 1,
+        history: [],
         view: 'tasks',
         connected: false
     };
 
     const VIEW_META = {
         tasks: ['下载队列', '后台自动排队下载 · 完整性校验 · 超时重传 · 多 CDN 轮询'],
+        history: ['历史下载记录', '所有历史下载 gid 数据 · 支持本地 JSON 备份 / 导入'],
         settings: ['下载设置', '间隔、并发、超时重传、WebP 转换与源站适配'],
         keys: ['API 密钥', '生成 / 吊销访问密钥，防止公网骚扰'],
         logs: ['运行日志', '服务实时运行状态'],
         about: ['使用说明', '快速上手与 API 示例']
     };
+
+    const FILTER_LABELS = {
+        '': '全部', queued: '排队中', downloading: '下载中', completed: '已完成',
+        completed_with_errors: '部分失败', failed: '失败', cancelled: '已取消'
+    };
+    const PAGE_SIZE = 20;
 
     function esc(s) {
         return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -87,6 +96,7 @@
         $('#view-title').textContent = VIEW_META[view][0];
         $('#view-sub').textContent = VIEW_META[view][1];
         if (view === 'settings') loadSettings();
+        if (view === 'history') loadHistory();
         if (view === 'keys') loadKeys();
         if (view === 'logs') { state.logSeq = 0; $('#log-list').innerHTML = ''; loadLogs(); }
     }
@@ -99,13 +109,11 @@
 
     function renderChips(s) {
         const c = s.counts || {};
-        $('#stat-chips').innerHTML = `
-            <div class="chip run">下载中 <b>${c.downloading || 0}</b></div>
-            <div class="chip">排队 <b>${c.queued || 0}</b></div>
-            <div class="chip ok">完成 <b>${c.completed || 0}</b></div>
-            <div class="chip warn">部分失败 <b>${c.completed_with_errors || 0}</b></div>
-            <div class="chip err">失败 <b>${c.failed || 0}</b></div>
-        `;
+        // 统计数字直接显示在各过滤按钮右侧
+        $$('#task-filters .chip-btn').forEach(b => {
+            const key = b.dataset.filter || 'total';
+            b.innerHTML = `${FILTER_LABELS[b.dataset.filter] || ''} <span class="chip-count">${c[key] || 0}</span>`;
+        });
         state.paused = !!s.paused;
         $('#btn-pause').textContent = s.paused ? '▶ 继续队列' : '⏸ 暂停队列';
     }
@@ -113,7 +121,7 @@
     function renderTasks() {
         const list = $('#task-list');
         const order = { downloading: 0, queued: 1 };
-        const tasks = state.tasks
+        const filtered = state.tasks
             .filter(t => !state.filter || t.status === state.filter)
             .sort((a, b) => {
                 const oa = order[a.status] === undefined ? 2 : order[a.status];
@@ -123,12 +131,20 @@
             });
 
         $('#tasks-summary').textContent = `共 ${state.tasks.length} 个任务`;
-        if (tasks.length === 0) {
+
+        // 分页
+        const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+        if (state.page > totalPages) state.page = totalPages;
+        if (state.page < 1) state.page = 1;
+        const slice = filtered.slice((state.page - 1) * PAGE_SIZE, state.page * PAGE_SIZE);
+
+        if (filtered.length === 0) {
             list.innerHTML = `<div class="empty">暂无任务<br><span class="small">在 nHentai 页面勾选本子后点「推送到下载服务」，任务会自动排队下载</span></div>`;
+            renderPager(1, 1, 0);
             return;
         }
 
-        list.innerHTML = tasks.map(t => {
+        list.innerHTML = slice.map(t => {
             const total = t.total || (t.pages ? t.pages.length : 0) || 0;
             const done = t.done || 0;
             const pct = total > 0 ? Math.round((done / total) * 100) : (t.status === 'completed' ? 100 : 0);
@@ -164,6 +180,20 @@
                 </div>
             </div>`;
         }).join('');
+        renderPager(state.page, totalPages, filtered.length);
+    }
+
+    function renderPager(page, totalPages, total) {
+        const el = $('#task-pager');
+        if (totalPages <= 1) {
+            el.innerHTML = total ? `<span class="muted small">共 ${total} 条</span>` : '';
+            return;
+        }
+        el.innerHTML = `
+            <button class="btn small" data-page="prev" ${page <= 1 ? 'disabled' : ''}>‹ 上一页</button>
+            <span class="muted small">第 ${page} / ${totalPages} 页 · 共 ${total} 条</span>
+            <button class="btn small" data-page="next" ${page >= totalPages ? 'disabled' : ''}>下一页 ›</button>
+        `;
     }
 
     function formatBytes(n) {
@@ -208,7 +238,7 @@
     /* ---------- 设置 ---------- */
     const SETTINGS_FIELDS = ['downloadDir', 'requestIntervalMs', 'galleryIntervalMs', 'pageConcurrency',
         'timeoutMs', 'maxAttempts', 'retryDelayMs', 'repairRounds', 'webpQuality',
-        'metaUrlTemplate', 'apiUrlTemplate', 'nhApiKey', 'nhCookie', 'userAgent'];
+        'metaUrlTemplate', 'nhCookie', 'userAgent'];
 
     async function loadSettings() {
         try {
@@ -307,6 +337,66 @@
         } catch (e) { /* 日志轮询失败静默 */ }
     }
 
+    /* ---------- 历史下载记录 ---------- */
+    async function loadHistory() {
+        try {
+            const d = await api('/api/history');
+            state.history = d.entries || [];
+            renderHistory();
+        } catch (e) {
+            toast('加载历史记录失败：' + esc(e.message), 'err');
+        }
+    }
+
+    function renderHistory() {
+        const q = ($('#history-search').value || '').trim().toLowerCase();
+        const rows = (state.history || []).filter(e =>
+            !q || String(e.gid).includes(q) || (e.title || '').toLowerCase().includes(q));
+        $('#history-summary').textContent = `共 ${state.history.length} 条历史记录${q ? `，搜索命中 ${rows.length} 条` : ''}`;
+        const tbody = $('#history-table tbody');
+        if (!rows.length) {
+            tbody.innerHTML = '<tr><td colspan="2" class="muted">暂无记录</td></tr>';
+            return;
+        }
+        const shown = rows.slice(0, 500);
+        tbody.innerHTML = shown.map(e => `
+            <tr>
+                <td><a href="https://nhentai.net/g/${esc(e.gid)}/" target="_blank" style="color:#ed2553;text-decoration:none;"><code>${esc(e.gid)}</code></a></td>
+                <td>${esc(e.title || '（未记录标题）')}</td>
+            </tr>`).join('') +
+            (rows.length > 500 ? `<tr><td colspan="2" class="muted small">… 仅显示前 500 条，请用搜索过滤</td></tr>` : '');
+    }
+
+    async function exportHistory() {
+        try {
+            const res = await fetch('/api/history/export', { headers: { 'X-API-Key': state.apiKey } });
+            if (!res.ok) throw new Error('HTTP ' + res.status);
+            const blob = await res.blob();
+            const a = document.createElement('a');
+            a.href = URL.createObjectURL(blob);
+            a.download = `nh_downloaded_history_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.json`;
+            a.click();
+            URL.revokeObjectURL(a.href);
+            toast('历史记录已备份到本地（与前端备份同格式）', 'ok');
+        } catch (e) {
+            toast('备份失败：' + esc(e.message), 'err');
+        }
+    }
+
+    async function importHistory(file) {
+        try {
+            const text = await file.text();
+            const data = JSON.parse(text);
+            const gids = Array.isArray(data) ? data : (Array.isArray(data.gids) ? data.gids : null);
+            if (!gids) throw new Error('文件格式不正确（需要 ["gid",...] 数组）');
+            const d = await api('/api/history/import', { method: 'POST', body: { gids } });
+            toast(`导入成功：新增 ${d.added} 条，当前共 ${d.total} 条`, 'ok');
+            loadHistory();
+        } catch (e) {
+            toast('导入失败：' + esc(e.message), 'err');
+        }
+    }
+
     /* ---------- 事件绑定与启动 ---------- */
     function bind() {
         $('#gate-submit').addEventListener('click', () => tryEnter($('#gate-key').value));
@@ -325,8 +415,27 @@
             const btn = e.target.closest('.chip-btn');
             if (!btn) return;
             state.filter = btn.dataset.filter;
+            state.page = 1;
             $$('#task-filters .chip-btn').forEach(b => b.classList.toggle('active', b === btn));
             renderTasks();
+        });
+
+        $('#task-pager').addEventListener('click', (e) => {
+            const btn = e.target.closest('button[data-page]');
+            if (!btn || btn.disabled) return;
+            state.page += btn.dataset.page === 'next' ? 1 : -1;
+            renderTasks();
+        });
+
+        $('#btn-clear-done').addEventListener('click', async () => {
+            const done = (state.counts && state.counts.completed) || 0;
+            if (!done) { toast('没有已下载的任务记录'); return; }
+            if (!confirm(`确定清空 ${done} 条已下载任务记录？\n（磁盘上的 zip / 文件不会被删除）`)) return;
+            try {
+                const d = await api('/api/queue/clear-completed', { method: 'POST' });
+                toast(`已清空 ${d.removed} 条已下载记录`, 'ok');
+                refreshAll();
+            } catch (e) { toast('操作失败：' + esc(e.message), 'err'); }
         });
 
         $('#task-list').addEventListener('click', (e) => {
@@ -352,6 +461,16 @@
 
         $('#btn-save-settings').addEventListener('click', saveSettings);
         $('#btn-create-key').addEventListener('click', createKey);
+
+        // 历史下载记录
+        $('#history-search').addEventListener('input', renderHistory);
+        $('#btn-history-export').addEventListener('click', exportHistory);
+        $('#btn-history-import').addEventListener('click', () => $('#history-import-input').click());
+        $('#history-import-input').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) importHistory(file);
+            e.target.value = '';
+        });
         $('#btn-copy-new-key').addEventListener('click', () => {
             navigator.clipboard.writeText($('#key-new-value').textContent)
                 .then(() => toast('已复制到剪贴板', 'ok'))
