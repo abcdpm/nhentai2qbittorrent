@@ -1,13 +1,8 @@
-# LANraragi nHentai 元数据插件
+# LANraragi nHentai 元数据插件（nHentaiCustom 2.0）
 
-## 文件说明
+单文件 `nHentaiCustom.pm` —— 在原版基础上新增 **[ID] 三级回退识别**（即原 NHentaiByTitleID 的逻辑，已合并回本文件作为 2.0 版本）。
 
-| 文件 | 说明 |
-| --- | --- |
-| `nHentaiCustom.pm` | **你的基准插件**（DOM 解析标签、支持社区标签、`{id}` 语法、source 标签识别、登录插件 `nhcustomcf`） |
-| `NHentaiByTitleID.pm` | 在你的基础上**最小程度修改**的版本：ID 识别改为三级回退 |
-
-## NHentaiByTitleID 的三级回退（相对 nHentaiCustom 的全部改动）
+## 三级回退（2.0 新增）
 
 | 优先级 | 条件 | 行为 |
 | --- | --- | --- |
@@ -15,25 +10,27 @@
 | ② | 名称**没有 `[id]`** | 用整个名称搜索，取第一个结果 |
 | ③ | 有 `[id]` 但**按 ID 抓不到** | **去掉末端 `[id]`**，用剩余名称搜索 |
 
-**未改动（与你的完全一致）**：`use` 语句、`login_from`、icon、参数面板（Save archive title）、
-旧式调用兼容 shim、`get_gallery_dom_by_title` / `get_gallery_id_from_title`（含 `{id}` 语法）/
-`get_html_from_NH` / `get_tags_from_NH`（DOM 标签解析、社区标签、source 标签、标题保存）。
+> 识别规则与 nHentai 下载服务的文件夹/压缩包命名一致：`本子名 [本子id]`。
 
-`get_tags` 内的差异仅有：
-1. ID 识别链新增「末端 `[id]`」分支（在 oneshot / source 标签之后、标题搜索之前）
+## 与原版（2.15）的差异（仅 3 处）
+
+1. `get_tags` 的 ID 识别链新增「末端 `[id]`」分支（在 oneshot / `source:` 标签之后、标题搜索之前）
 2. `get_tags_from_NH` 失败时的回退块（③）
-3. 扩展名剥离 `.zip…` 提前一行（保证 `标题 [123].zip` 能匹配到末端 `[id]`）
+3. 扩展名剥离 `.zip…` 提前一行（保证 `标题 [123].zip` 能匹配末端 `[id]`）
+
+**其余全部原样保留**：DOM 标签解析（官方 `.tag` + 社区 `.tagchip`）、`tag:` 省略命名空间规则、
+`source:` 标签、`{id}` 语法、Save archive title 参数、`login_from => "nhcustomcf"`、icon、
+旧式调用兼容 shim、`get_gallery_dom_by_title` / `get_gallery_id_from_title` / `get_html_from_NH` / `get_tags_from_NH`。
 
 ## 安装
 
-任选其一：LANraragi → 插件配置 → 上传 `NHentaiByTitleID.pm`；或放入插件目录后重启。
-与 `nHentaiCustom.pm` 可共存（namespace 不同：`nhtitleid` / `nhcustom`）。
+LANraragi → 插件配置 → 上传 `nHentaiCustom.pm`（覆盖旧版即可，namespace `nhcustom` 不变，配置保留）。
 
 ## 验证
 
-已用桩模块 + Mock DOM 对 `get_tags` 全链路断言 19 项全部通过：
-末端 `[id]` 识别（含全角/圆括号）、①②③三级回退、oneshot URL、source 标签、`{id}` 语法、
-标题保存、失败报错等。
+桩模块 + Mock DOM 全链路 19 项断言通过：末端 `[id]` 识别、①②③三级回退、oneshot URL、
+`source:` 标签、`{id}` 语法、Save archive title、失败报错等。
+
 
 
 ## 识别逻辑（三级回退）

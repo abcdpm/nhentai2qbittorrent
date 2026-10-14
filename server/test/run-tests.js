@@ -836,6 +836,38 @@ test('POST /api/queue/clear-completed：清空已下载记录（磁盘保留）+
     }
 });
 
+test('POST /api/cdn/test：CDN 节点延迟测量（含不可达节点）', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    const keys = new KeyStore(env.tmp, env.logger);
+    const created = keys.create('测试密钥');
+    const handler = createHandler({
+        config: env.config, store: env.store, keys, queue: env.queue,
+        logger: env.logger, downloader: env.downloader, state: new StateStore(env.tmp)
+    });
+    const server = http.createServer((req, res) => handler(req, res).catch(() => { res.writeHead(500); res.end(); }));
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+        const res = await fetch(base + '/api/cdn/test', {
+            method: 'POST',
+            headers: { 'X-API-Key': created.raw, 'Content-Type': 'application/json' },
+            body: JSON.stringify({ urls: [`http://127.0.0.1:${mock.port}/cdn1`, `http://127.0.0.1:${mock.port}/cdn2`, 'http://127.0.0.1:1/unreachable'] })
+        });
+        assert.strictEqual(res.status, 200);
+        const d = await res.json();
+        assert.strictEqual(d.results.length, 3);
+        assert.ok(d.results[0].ok && typeof d.results[0].latencyMs === 'number', '可达节点应有延迟数值');
+        assert.ok(d.results[1].ok, '第二个节点可达');
+        const bad = d.results.find(r => r.url.includes('unreachable'));
+        assert.ok(bad && !bad.ok, '不可达节点应标记失败');
+    } finally {
+        server.close();
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
 test('Web 界面与静态资源可访问（无需密钥）', async () => {
     const mock = await createMockSite(GALLERY_1);
     const env = makeEnv(mock);

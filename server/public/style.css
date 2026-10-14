@@ -139,6 +139,21 @@ code {
     background: rgba(255, 255, 255, .12); border-radius: 999px;
     padding: 1px 9px; margin-left: 6px; font-weight: 700; color: var(--text); font-size: 11.5px;
 }
+/* 统计数字按类别着色 */
+.chip-count.zero { opacity: .5; }
+.chip-count.c-all { color: #4ea1ff; background: rgba(78, 161, 255, .16); }
+.chip-count.c-queued { color: #b57aff; background: rgba(181, 122, 255, .16); }
+.chip-count.c-downloading { color: #26c6da; background: rgba(38, 198, 218, .16); }
+.chip-count.c-completed { color: #2ecc71; background: rgba(46, 204, 113, .16); }
+.chip-count.c-completed_with_errors { color: #f5b942; background: rgba(245, 185, 66, .16); }
+.chip-count.c-failed { color: #ff5b6e; background: rgba(255, 91, 110, .16); }
+.chip-count.c-cancelled { color: #8b93a7; background: rgba(139, 147, 167, .16); }
+
+/* CDN 测速 */
+.cdn-test-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.lat-good { color: #2ecc71; }
+.lat-mid { color: #f5b942; }
+.lat-bad { color: #ff5b6e; }
 
 .pager {
     display: flex; align-items: center; justify-content: center; gap: 14px;

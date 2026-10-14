@@ -109,10 +109,12 @@
 
     function renderChips(s) {
         const c = s.counts || {};
-        // 统计数字直接显示在各过滤按钮右侧
+        // 统计数字直接显示在各过滤按钮右侧（按类别着色）
         $$('#task-filters .chip-btn').forEach(b => {
             const key = b.dataset.filter || 'total';
-            b.innerHTML = `${FILTER_LABELS[b.dataset.filter] || ''} <span class="chip-count">${c[key] || 0}</span>`;
+            const n = c[key] || 0;
+            const cls = key === 'total' ? 'all' : key;
+            b.innerHTML = `${FILTER_LABELS[b.dataset.filter] || ''} <span class="chip-count c-${cls}${n ? '' : ' zero'}">${n}</span>`;
         });
         state.paused = !!s.paused;
         $('#btn-pause').textContent = s.paused ? '▶ 继续队列' : '⏸ 暂停队列';
@@ -258,6 +260,7 @@
             $('#sharp-status').textContent = d.sharpAvailable
                 ? '✓ sharp 已安装：WebP 转换可用（gif → 动态 webp）'
                 : '⚠ 未检测到 sharp，转换已自动禁用并保留原格式（npm install sharp 可启用）';
+            testCdn();   // 打开设置自动测速各 CDN 节点延迟
         } catch (e) {
             toast('加载设置失败：' + esc(e.message), 'err');
         }
@@ -397,6 +400,35 @@
         }
     }
 
+    /* ---------- CDN 节点测速 ---------- */
+    async function testCdn() {
+        const status = $('#cdn-test-status');
+        const urls = $('#set-cdnBaseUrls').value.split('\n').map(v => v.trim()).filter(Boolean);
+        if (!urls.length) {
+            $('#cdn-latency-table tbody').innerHTML = '';
+            status.textContent = '未配置 CDN 节点';
+            return;
+        }
+        status.textContent = '📡 测速中…';
+        try {
+            const d = await api('/api/cdn/test', { method: 'POST', body: { urls } });
+            const rows = d.results || [];
+            rows.sort((a, b) => (a.latencyMs == null ? 1e9 : a.latencyMs) - (b.latencyMs == null ? 1e9 : b.latencyMs));
+            $('#cdn-latency-table tbody').innerHTML = rows.map(r => {
+                const lat = r.ok ? r.latencyMs : null;
+                const cls = lat == null ? 'lat-bad' : (lat < 200 ? 'lat-good' : (lat < 500 ? 'lat-mid' : 'lat-bad'));
+                return `<tr>
+                    <td><code>${esc(r.url)}</code></td>
+                    <td class="${cls}"><b>${lat == null ? '—' : lat + ' ms'}</b></td>
+                    <td class="${r.ok ? 'lat-good' : 'lat-bad'}">${r.ok ? '正常' : esc(r.error || '失败')}</td>
+                </tr>`;
+            }).join('');
+            status.textContent = `测速完成（快→慢排序）· ${new Date().toLocaleTimeString()}`;
+        } catch (e) {
+            status.textContent = '测速失败：' + esc(e.message);
+        }
+    }
+
     /* ---------- 事件绑定与启动 ---------- */
     function bind() {
         $('#gate-submit').addEventListener('click', () => tryEnter($('#gate-key').value));
@@ -460,6 +492,7 @@
         });
 
         $('#btn-save-settings').addEventListener('click', saveSettings);
+        $('#btn-cdn-test').addEventListener('click', testCdn);
         $('#btn-create-key').addEventListener('click', createKey);
 
         // 历史下载记录

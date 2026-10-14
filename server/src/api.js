@@ -211,6 +211,32 @@ function createHandler(ctx) {
                 return;
             }
 
+            // ---- CDN 节点测速（服务端实测各节点连接延迟）----
+            if (pathname === '/api/cdn/test' && method === 'POST') {
+                const body = await readBody(req).catch(() => ({}));
+                let urls = Array.isArray(body.urls) && body.urls.length
+                    ? body.urls.map(String)
+                    : (config.get('cdnBaseUrls') || []);
+                urls = urls.map(u => u.trim()).filter(Boolean).slice(0, 30);
+                const results = await Promise.all(urls.map(async (u) => {
+                    const base = u.replace(/\/+$/, '');
+                    const t0 = Date.now();
+                    try {
+                        await fetch(base + '/', {
+                            method: 'GET',
+                            headers: { 'User-Agent': config.get('userAgent') },
+                            signal: AbortSignal.timeout(5000)
+                        });
+                        return { url: u, latencyMs: Date.now() - t0, ok: true };
+                    } catch (e) {
+                        const timedOut = e.name === 'TimeoutError' || e.name === 'AbortError';
+                        return { url: u, latencyMs: null, ok: false, error: timedOut ? '超时(>5s)' : (e.message || '连接失败') };
+                    }
+                }));
+                sendJson(res, 200, { ok: true, results });
+                return;
+            }
+
             // ---- Cookie 同步（油猴脚本自动上传浏览器 Cookie，解除 Cloudflare 403）----
             if (pathname === '/api/cookie' && method === 'POST') {
                 const body = await readBody(req);
