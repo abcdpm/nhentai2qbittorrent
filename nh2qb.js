@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nHentai → Local Image Scraper
 // @namespace    http://tampermonkey.net/
-// @version      5.5.0
+// @version      5.6.0
 // @description  直接提取高清原图下载；「推送到下载服务」自动附带元数据（media_id/Pages数），服务端纯CDN下载避开官方API限流；完整性校验/超时重传/多CDN轮询/WebP统一/自动压缩zip；下载完成自动标记已下载；文件夹格式：本子名 [本子id]
 // @author       Paccu
 // @match        https://nhentai.net/g/*
@@ -80,8 +80,10 @@
     let SERVER_KEY = localStorage.getItem('nh_server_key') || '';
     const CHECK_KEY = 'nh_qb_checked';
     const DOWNLOADED_KEY = 'nh_qb_downloaded_gids';
+    const DOWNLOADING_KEY = 'nh_qb_downloading_gids';
     let savedChecked = {};
     let downloadedSet = new Set();
+    let downloadingSet = new Set();
     let globalFailedItems = [];
 
     function syncLocalState() {
@@ -92,6 +94,14 @@
                 downloadedSet = new Set(stored.map(String));
             }
         } catch (e) {}
+        try {
+            const dl = JSON.parse(localStorage.getItem(DOWNLOADING_KEY) || '[]');
+            downloadingSet = Array.isArray(dl) ? new Set(dl.map(String)) : new Set();
+        } catch (e) { downloadingSet = new Set(); }
+        // 已完成的从「下载中」清理
+        for (const gid of [...downloadingSet]) {
+            if (downloadedSet.has(gid)) downloadingSet.delete(gid);
+        }
 
         let needsUpdate = false;
         for (let gid of Object.keys(savedChecked)) {
@@ -248,27 +258,88 @@
             notify(`<div class='title'>推送失败</div>${escapeHtml(reason)}`, 8000);
             return null;
         }
+        // 记录本浏览器推送过的任务 + 立即打「下载中」黄色角标
+        if (res.json && Array.isArray(res.json.added)) {
+            const pushed = readPushedMap();
+            for (const it of res.json.added) {
+                pushed[String(it.gid)] = Date.now();
+                downloadingSet.add(String(it.gid));
+            }
+            localStorage.setItem('nh_pushed_gids', JSON.stringify(pushed));
+            localStorage.setItem(DOWNLOADING_KEY, JSON.stringify([...downloadingSet]));
+            requestRender();
+        }
         return res.json;
     }
 
     /**
      * 自动同步：下载服务中「下载完成且完整性校验通过」的本子自动标记为已下载
      * （与本地下载完成后的标记逻辑一致：已下载角标 + 封面变暗 + 取消勾选）
+     *
+     * 可靠性说明：完成状态由服务端持久化（唯一事实源），本函数只是"拉取补标"。
+     * 即使推送后浏览器被关闭，下次打开任意 nHentai 页面 3 秒内即会补上标记，
+     * 并对你推送过的任务弹「下载完成」提示。
      */
     async function syncDownloadedFromServer() {
         if (!SERVER_KEY) return;
-        const res = await serverApi('/api/tasks?status=completed', 'GET');
+        const res = await serverApi('/api/tasks', 'GET');
         if (!res.ok || !res.json) return;
+
+        const pushedMap = readPushedMap();
         let changed = false;
+        const justDone = [];      // 本次新识别为已下载、且值得提示的
+        const seen = new Set();
+
         for (const t of (res.json.tasks || [])) {
             const gid = String(t.gid);
-            if (!downloadedSet.has(gid)) { downloadedSet.add(gid); changed = true; }
+            seen.add(gid);
+
+            if (t.status === 'completed') {
+                if (downloadingSet.has(gid)) { downloadingSet.delete(gid); changed = true; }
+                const isMine = !!pushedMap[gid];
+                if (pushedMap[gid]) delete pushedMap[gid];
+                if (downloadedSet.has(gid)) continue;
+                downloadedSet.add(gid);
+                changed = true;
+
+                // 提示条件：是本浏览器推送过的任务，或 15 分钟内刚完成（历史首次同步不打扰）
+                const finishedAt = t.finishedAt ? new Date(t.finishedAt).getTime() : 0;
+                const isRecent = finishedAt && (Date.now() - finishedAt) < 15 * 60 * 1000;
+                if (isMine || isRecent) justDone.push(t);
+            } else if (t.status === 'queued' || t.status === 'downloading') {
+                // 「下载中」黄色角标状态
+                if (!downloadingSet.has(gid)) { downloadingSet.add(gid); changed = true; }
+            } else {
+                // failed / cancelled → 取消「下载中」标记
+                if (downloadingSet.has(gid)) { downloadingSet.delete(gid); changed = true; }
+            }
         }
+        // 服务端已删除的任务：清理「下载中」残留
+        for (const gid of [...downloadingSet]) {
+            if (!seen.has(gid)) { downloadingSet.delete(gid); changed = true; }
+        }
+
         if (changed) {
             localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
+            localStorage.setItem(DOWNLOADING_KEY, JSON.stringify([...downloadingSet]));
+            localStorage.setItem('nh_pushed_gids', JSON.stringify(pushedMap));
             syncLocalState();
             requestRender();
         }
+
+        if (justDone.length) {
+            const names = justDone.slice(0, 3).map(t => escapeHtml(t.title || t.gid)).join('<br>');
+            const more = justDone.length > 3 ? `<div style="color:#aaa;font-size:11px;">… 等共 ${justDone.length} 本</div>` : '';
+            notify(`
+                <div class='title' style="color:#4caf50;">✅ 下载完成（已自动标记已下载）</div>
+                <div style="font-size:12px;color:#ccc;word-break:break-all;">${names}</div>${more}
+            `, 10000);
+        }
+    }
+
+    /** 本浏览器推送过、尚未标记完成的任务清单 {gid: 推送时间戳} */
+    function readPushedMap() {
+        try { return JSON.parse(localStorage.getItem('nh_pushed_gids') || '{}') || {}; } catch (e) { return {}; }
     }
 
     /**
@@ -713,6 +784,30 @@
         });
     }
 
+    /** 缩略图状态渲染：已下载（绿）/ 下载中（黄）角标 + 封面变暗 + 取消勾选 */
+    function renderThumbState(thumb, gid) {
+        thumb.querySelectorAll('.nh-state-tag').forEach(el => el.remove());
+        const cover = thumb.querySelector('.cover');
+        const isDownloaded = downloadedSet.has(gid);
+        const isDownloading = !isDownloaded && downloadingSet.has(gid);
+
+        if (isDownloaded || isDownloading) {
+            const tag = document.createElement('div');
+            tag.className = 'downloaded-tag nh-state-tag nh-custom-injected';
+            tag.style.cssText = 'position:absolute;top:0;left:0;' +
+                (isDownloaded ? 'background:#4caf50;color:#fff;' : 'background:#f5b942;color:#222;') +
+                'font-size:12px;padding:2px 6px;z-index:25;border-bottom-right-radius:4px;font-weight:bold;box-shadow:2px 2px 4px rgba(0,0,0,0.5);pointer-events:none;';
+            tag.innerText = isDownloaded ? '已下载' : '下载中';
+            thumb.appendChild(tag);
+            if (cover) cover.classList.add('nh-cover-dimmed');
+        } else if (cover) {
+            cover.classList.remove('nh-cover-dimmed');
+        }
+
+        const cb = thumb.querySelector('input[type=checkbox]');
+        if (cb) cb.checked = !!savedChecked[gid];
+    }
+
     function addBatchFeature() {
         if (!document.getElementById('nhqb_left_panel')) {
             const leftPanel = document.createElement('div');
@@ -832,24 +927,7 @@
             const isDownloaded = downloadedSet.has(gid);
 
             if (thumb.getAttribute('data-nh-gid') === gid) {
-                const cover = thumb.querySelector('.cover');
-                let tag = thumb.querySelector('.downloaded-tag');
-                if (isDownloaded) {
-                    if (!tag) {
-                        tag = document.createElement('div');
-                        tag.className = 'downloaded-tag nh-custom-injected';
-                        tag.style.cssText = 'position:absolute;top:0;left:0;background:#4caf50;color:#fff;font-size:12px;padding:2px 6px;z-index:25;border-bottom-right-radius:4px;font-weight:bold;box-shadow:2px 2px 4px rgba(0,0,0,0.5);pointer-events:none;';
-                        tag.innerText = '已下载'; thumb.appendChild(tag);
-                    }
-                    if (cover) cover.classList.add('nh-cover-dimmed');
-                } else {
-                    if (tag) tag.remove();
-                    if (cover) cover.classList.remove('nh-cover-dimmed');
-                }
-
-                const cb = thumb.querySelector('input[type=checkbox]');
-                if (cb) cb.checked = !!savedChecked[gid];
-
+                renderThumbState(thumb, gid);
                 return;
             }
 
@@ -880,16 +958,8 @@
             });
 
             const cover = thumb.querySelector('.cover');
-            if (isDownloaded) {
-                const tag = document.createElement('div');
-                tag.className = 'downloaded-tag nh-custom-injected';
-                tag.style.cssText = 'position:absolute;top:0;left:0;background:#4caf50;color:#fff;font-size:12px;padding:2px 6px;z-index:25;border-bottom-right-radius:4px;font-weight:bold;box-shadow:2px 2px 4px rgba(0,0,0,0.5);pointer-events:none;';
-                tag.innerText = '已下载'; thumb.appendChild(tag);
-                if(cover) cover.classList.add('nh-cover-dimmed');
-            } else {
-                if(cover) cover.classList.remove('nh-cover-dimmed');
-            }
             thumb.appendChild(cb);
+            renderThumbState(thumb, gid);
 
             const copyBtn = document.createElement('button');
             const fullLink = a.href; copyBtn.className = 'nh-copy-link-btn nh-custom-injected'; copyBtn.innerText = '复制链接';
@@ -1128,6 +1198,10 @@
     setInterval(() => syncCookieToServer(false), 60000);
     setTimeout(syncDownloadedFromServer, 3000);
     setInterval(syncDownloadedFromServer, 60000);
+    // 标签页切回前台时立即同步（长开页面也能及时感知完成）
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') syncDownloadedFromServer();
+    });
 
     if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', observeDOM);

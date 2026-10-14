@@ -39,6 +39,7 @@ docker compose up -d                          # 本机刚推送过则直接运�
 
 - **镜像版本**：`.env` 中 `DOCKERHUB_USER=llllalex`、`IMAGE_TAG=1.0.0`，推送脚本与 compose 共用；每次推送固定上传 `:1.0.0`（当前版本号）与 `:latest` 两个标签
 - **持久化**：`./data`（配置 / API 密钥 / 任务队列）、`./downloads`（本子，格式 `本子名 [本子id]`）
+- **文件归属**：支持 `PUID`/`PGID`（linuxserver.io 风格），默认 `PUID=1000 PGID=100`，下载文件自动归属该用户：`PUID=$(id -u) PGID=$(id -g) docker compose up -d`（或写入 `.env`）
 - **首次 API Key**：`docker logs nh-download-server` 或 `./data/INITIAL_API_KEY.txt`
 - **Web 控制台**：`http://部署机IP:8787`（宿主机端口可改：`NH_HOST_PORT=8080 docker compose up -d`）
 - **环境变量**：所有配置项都可用 `NH_` 前缀环境变量固定（如 `NH_REQUEST_INTERVAL_MS`、`NH_CONVERT_TO_WEBP`、`NH_CDN_BASE_URLS` 逗号分隔），**优先级高于 Web 界面保存值**；compose 默认仅固定 `NH_HOST`/`NH_PORT`（监听相关，界面中不可改）
@@ -88,6 +89,15 @@ GET/PUT /api/settings                 GET/POST /api/keys     DELETE /api/keys/:i
 - 与服务端一致的文件夹格式：`【根目录】/【本子名 [本子id]】/【页码.后缀】`
 
 ## 更新日志
+
+### v5.6.0
+- 推送到下载服务时立即打**黄色「下载中」角标 + 封面变暗 + 取消勾选**；下载完成自动换成绿色「已下载」角标（失败/取消则恢复普通封面）；页面刷新后状态经服务端同步自动恢复
+- Docker 镜像支持 **`PUID`/`PGID`**（linuxserver.io 风格）：entrypoint 自动调整用户/组、修正数据卷归属并降权运行，默认 `PUID=1000 PGID=100`
+
+### v5.5.1
+- Web 控制台下载进度条改为绿色
+- 下载完成提示增强：新完成的任务弹「✅ 下载完成（已自动标记已下载）」；**本浏览器推送过的任务即使关闭浏览器、隔天再打开页面也会提示**（完成状态由服务端持久化，页面加载 3 秒内自动补标；标签页切回前台时立即同步）
+- 同步机制说明：服务端 `data/tasks.json` 为唯一事实源，前端每 60s + 页面加载时 + 标签页激活时拉取已完成列表补标「已下载」
 
 ### v5.5.0
 - **放弃官方 v2 API（限流严重）**：恢复原逻辑——脚本推送时自动附带元数据（页面解析 `media_id` / `Pages: N` / 后缀表），服务端**直接请求 CDN 下载图片、零元数据请求**；无 meta 的任务按原逻辑抓详情页 HTML；`apiUrlTemplate` 默认留空=不使用官方 API（可选配置为备用源）

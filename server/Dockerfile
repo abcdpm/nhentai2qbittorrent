@@ -15,6 +15,8 @@ RUN npm install --omit=dev --no-audit --no-fund
 COPY server.js ./
 COPY src ./src
 COPY public ./public
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # 容器内必须监听 0.0.0.0 才能做端口映射；
 # 优先级：环境变量 > /app/data/config.json > 内置默认值（NH_ + 配置项全大写）
@@ -31,4 +33,5 @@ EXPOSE 8787
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD node -e "fetch('http://127.0.0.1:'+process.env.NH_PORT+'/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["node", "server.js"]
+# 入口脚本支持 PUID/PGID（linuxserver.io 风格）：指定下载文件/配置的宿主归属并降权运行
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

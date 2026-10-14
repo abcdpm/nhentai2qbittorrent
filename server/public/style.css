@@ -159,7 +159,7 @@ code {
 .progress { height: 8px; border-radius: 999px; background: var(--panel-2); overflow: hidden; margin-top: 13px; }
 .progress-bar {
     height: 100%; border-radius: 999px; width: 0;
-    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    background: linear-gradient(90deg, #2ecc71, #24c98a);
     transition: width .5s ease;
 }
 .progress-bar.ok { background: linear-gradient(90deg, #24c98a, #2ecc71); }
