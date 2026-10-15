@@ -111,7 +111,7 @@
             }
         }
         if (needsUpdate) {
-            persistLocalState();
+            persistChecked();
         }
     }
 
@@ -345,8 +345,15 @@
      * 统一持久化：nh_qb_downloaded_gids 等字段以下载服务为主存储（云端持久化），
      * 浏览器 localStorage 仅作缓存；变更后自动（防抖 2s）上传到服务端。
      */
-    function persistLocalState() {
+    /**
+     * 勾选状态：仅存浏览器本地，不上传云端。
+     * 只在用户实际操作时写入，后台同步绝不触碰——避免多页签/后台刷新互相覆写导致勾选消失。
+     */
+    function persistChecked() {
         localStorage.setItem(CHECK_KEY, JSON.stringify(savedChecked));
+    }
+
+    function persistLocalState() {
         localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
         localStorage.setItem(DOWNLOADING_KEY, JSON.stringify([...downloadingSet]));
         localStorage.setItem('nh_pushed_gids', JSON.stringify(readPushedMap()));
@@ -360,13 +367,12 @@
         stateUploadTimer = setTimeout(pushStateToServer, 2000);
     }
 
-    /** 把浏览器状态上传到下载服务（云端为主存储） */
+    /** 把浏览器状态上传到下载服务（云端为主存储；勾选状态仅存本地，不上传） */
     async function pushStateToServer() {
         if (!SERVER_KEY) return;
         await serverApi('/api/state', 'PUT', {
             state: {
                 downloadedGids: [...downloadedSet],
-                checked: savedChecked,
                 downloadingGids: [...downloadingSet],
                 pushedGids: readPushedMap()
             }
@@ -723,6 +729,7 @@
                 const inputCb = document.querySelector(`input[data-gid="${gid}"]`);
                 if (inputCb) inputCb.checked = false;
                 
+                persistChecked();
                 persistLocalState();
                 syncLocalState();
                 requestRender();
@@ -860,7 +867,7 @@
                     const isChinese = thumb.classList.contains('lang-cn') || title.includes('[Chinese]') || title.includes('汉化');
                     if (isChinese && !isDownloaded && !cb.checked) { cb.checked = true; savedChecked[gid] = title; count++; }
                 });
-                persistLocalState();
+                persistChecked();
                 if (count > 0) notify(`<div class='title'>全选完成</div>已自动选中本页 ${count} 个未下载的中文本子`, 5000);
                 else notify(`<div class='title'>全选提示</div>当前页面没有找到需要勾选的中文本子`, 5000);
             });
@@ -873,7 +880,7 @@
                     const gid = String(cb.dataset.gid);
                     if (cb.checked) { cb.checked = false; delete savedChecked[gid]; count++; }
                 });
-                persistLocalState();
+                persistChecked();
                 if (count > 0) notify(`<div class='title'>取消选中</div>已清空本页 ${count} 个选中状态`, 5000);
             });
 
@@ -910,7 +917,7 @@
                     const cb = document.querySelector(`input[data-gid="${it.gid}"]`);
                     if (cb) cb.checked = false;
                 }
-                persistLocalState();
+                persistChecked();
 
                 const skipped = result.skipped || [];
                 const skippedHtml = skipped.length
@@ -934,7 +941,7 @@
                 });
 
                 if (checked.length === 0) {
-                    persistLocalState();
+                    persistChecked();
                     return;
                 }
 
@@ -984,7 +991,7 @@
             if (savedChecked[gid]) cb.checked = true;
             cb.addEventListener('change', () => {
                 if (cb.checked) savedChecked[gid] = title; else delete savedChecked[gid];
-                persistLocalState();
+                persistChecked();
             });
 
             const cover = thumb.querySelector('.cover');
@@ -1077,8 +1084,7 @@
 
             // ① 已下载清单（并集；服务端已含所有已完成任务）
             for (const gid of (s.downloadedGids || [])) downloadedSet.add(String(gid));
-            // ② 勾选状态（云端为准，快照覆盖，支持跨浏览器恢复勾选）
-            savedChecked = Object.assign({}, s.checked || {});
+            // ② 勾选状态仅存浏览器本地，云端同步不覆盖（避免后台刷新丢失勾选）
             // ③ 下载中标记
             downloadingSet = new Set((s.downloadingGids || []).map(String));
             // ④ 推送清单

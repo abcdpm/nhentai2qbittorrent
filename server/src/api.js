@@ -1,6 +1,8 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
+const tls = require('tls');
+const net = require('net');
 const { parse } = require('url');
 
 const VERSION = process.env.APP_VERSION || (() => { try { return require('../package.json').version; } catch (e) { return 'dev'; } })();
@@ -71,6 +73,42 @@ function serveStatic(res, pathname) {
         }
         res.writeHead(200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream' });
         res.end(data);
+    });
+}
+
+/**
+ * 纯连接延迟探测：DNS + TCP + TLS 握手计时。
+ * 不发 HTTP 请求——避免被 WAF/Cloudflare 对根路径断开（fetch failed）；
+ * 失败时返回具体原因（ENOTFOUND / ECONNREFUSED / 超时 …）。
+ */
+function probeConnection(rawUrl, timeoutMs = 5000) {
+    return new Promise((resolve) => {
+        let u;
+        try { u = new URL(rawUrl); } catch (e) {
+            resolve({ url: rawUrl, latencyMs: null, ok: false, error: 'URL 无效' });
+            return;
+        }
+        const isHttps = u.protocol === 'https:';
+        const host = u.hostname;
+        const port = u.port ? Number(u.port) : (isHttps ? 443 : 80);
+        const t0 = Date.now();
+        let settled = false;
+        let sock = null;
+        const done = (err) => {
+            if (settled) return;
+            settled = true;
+            const latencyMs = Date.now() - t0;
+            try { if (sock) sock.destroy(); } catch (e) { /* ignore */ }
+            if (err) resolve({ url: rawUrl, latencyMs: null, ok: false, error: String(err) });
+            else resolve({ url: rawUrl, latencyMs, ok: true });
+        };
+        const opts = { host, port, timeout: timeoutMs };
+        if (isHttps) opts.servername = host;
+        sock = isHttps
+            ? tls.connect(opts, () => done(null))
+            : net.connect(opts, () => done(null));
+        sock.on('timeout', () => done(`超时(>${timeoutMs}ms)`));
+        sock.on('error', (e) => done(e.code || e.message || '连接失败'));
     });
 }
 
@@ -211,28 +249,14 @@ function createHandler(ctx) {
                 return;
             }
 
-            // ---- CDN 节点测速（服务端实测各节点连接延迟）----
+            // ---- CDN 节点测速（TCP/TLS 连接延迟，不受 WAF/Cloudflare 拦截影响）----
             if (pathname === '/api/cdn/test' && method === 'POST') {
                 const body = await readBody(req).catch(() => ({}));
                 let urls = Array.isArray(body.urls) && body.urls.length
                     ? body.urls.map(String)
                     : (config.get('cdnBaseUrls') || []);
                 urls = urls.map(u => u.trim()).filter(Boolean).slice(0, 30);
-                const results = await Promise.all(urls.map(async (u) => {
-                    const base = u.replace(/\/+$/, '');
-                    const t0 = Date.now();
-                    try {
-                        await fetch(base + '/', {
-                            method: 'GET',
-                            headers: { 'User-Agent': config.get('userAgent') },
-                            signal: AbortSignal.timeout(5000)
-                        });
-                        return { url: u, latencyMs: Date.now() - t0, ok: true };
-                    } catch (e) {
-                        const timedOut = e.name === 'TimeoutError' || e.name === 'AbortError';
-                        return { url: u, latencyMs: null, ok: false, error: timedOut ? '超时(>5s)' : (e.message || '连接失败') };
-                    }
-                }));
+                const results = await Promise.all(urls.map(u => probeConnection(u)));
                 sendJson(res, 200, { ok: true, results });
                 return;
             }
