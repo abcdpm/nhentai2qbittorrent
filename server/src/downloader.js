@@ -93,6 +93,20 @@ class WebpConverter {
     }
 }
 
+/** 删除文件夹（SMB/FUSE 占用场景下重试 3 次），返回是否成功 */
+async function removeDirWithRetry(dir) {
+    for (let i = 1; i <= 3; i++) {
+        try {
+            fs.rmSync(dir, { recursive: true, force: true });
+            return true;
+        } catch (e) {
+            if (i >= 3) return false;
+            await sleep(1000 * i);   // .fuse_hidden* 被 SMB 占用时稍候会自动释放
+        }
+    }
+    return false;
+}
+
 /**************************************************************************
  * 下载引擎：多 CDN 轮询 + 超时重传 + 完整性校验 + 间隔控制 + WebP 统一
  **************************************************************************/
@@ -329,18 +343,29 @@ class Downloader {
             const zipName = `${task.folder}.zip`;
             const zipPath = path.join(cfg.get('downloadDir'), zipName);
             try {
+                // 清理下载残留 .part（SMB/FUSE 场景偶发）
+                for (const f of fs.readdirSync(dir)) {
+                    if (f.endsWith('.part')) { try { fs.unlinkSync(path.join(dir, f)); } catch (e) { /* ignore */ } }
+                }
                 const r = createZipFromDir(dir, zipPath);
                 const entries = readZipEntries(zipPath);
                 if (entries.length !== task.done) {
-                    throw new Error(`压缩包条目数不符 (${entries.length}/${task.done})`);
-                }
-                task.zipFile = zipName;
-                task.zipBytes = r.bytes;
-                log(`已压缩: ${zipName} (${formatBytes(r.bytes)}, ${r.entries} 个文件)`);
-                if (!cfg.get('keepFolderAfterZip')) {
-                    fs.rmSync(dir, { recursive: true, force: true });
-                    task.folderRemoved = true;
-                    log(`已清理原图片文件夹: ${task.folder}`);
+                    // 条目数不符不视为任务失败：保留文件夹供人工核对（常见于 SMB 残留文件）
+                    task.zipError = `压缩包条目数不符 (${entries.length}/${task.done})，保留原文件夹`;
+                    log(`⚠ ${task.zipError}`);
+                } else {
+                    task.zipFile = zipName;
+                    task.zipBytes = r.bytes;
+                    log(`已压缩: ${zipName} (${formatBytes(r.bytes)}, ${r.entries} 个文件)`);
+                    if (!cfg.get('keepFolderAfterZip')) {
+                        if (await removeDirWithRetry(dir)) {
+                            task.folderRemoved = true;
+                            log(`已清理原图片文件夹: ${task.folder}`);
+                        } else {
+                            task.zipError = '原文件夹被占用未能删除（SMB/.fuse_hidden 占用中，稍后自动释放）';
+                            log(`⚠ ${task.zipError}`);
+                        }
+                    }
                 }
             } catch (e) {
                 task.zipError = e.message;

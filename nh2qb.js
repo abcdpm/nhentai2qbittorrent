@@ -102,17 +102,8 @@
         for (const gid of [...downloadingSet]) {
             if (downloadedSet.has(gid)) downloadingSet.delete(gid);
         }
-
-        let needsUpdate = false;
-        for (let gid of Object.keys(savedChecked)) {
-            if (downloadedSet.has(String(gid))) {
-                delete savedChecked[gid];
-                needsUpdate = true;
-            }
-        }
-        if (needsUpdate) {
-            persistChecked();
-        }
+        // 注意：此处不再"剪枝"勾选状态——勾选只在用户操作/本子刚变为已下载时变更，
+        // 避免每次渲染把已下载清单里的勾选删掉（表现为勾选莫名消失）。
     }
 
     window.addEventListener('storage', (e) => {
@@ -217,19 +208,22 @@
         });
     }
 
-    /** 抓取单本元数据用于随任务上传（失败返回 null，服务端会回退自行抓取） */
+    /** 抓取单本元数据用于随任务上传（失败重试 1 次；仍失败返回 null，服务端会回退自行抓取） */
     async function fetchMetaForPush(gid, htmlString = null) {
-        try {
-            const m = await fetchGalleryMeta(gid, htmlString);
-            return {
-                mediaId: m.mediaId,
-                numPages: m.numPages,
-                extMap: m.extMap || [],
-                coverHost: m.imgHost ? 'https://' + m.imgHost : null
-            };
-        } catch (e) {
-            return null;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+                const m = await fetchGalleryMeta(gid, htmlString);
+                return {
+                    mediaId: m.mediaId,
+                    numPages: m.numPages,
+                    extMap: m.extMap || [],
+                    coverHost: m.imgHost ? 'https://' + m.imgHost : null
+                };
+            } catch (e) {
+                if (attempt < 2) await new Promise(r => setTimeout(r, 800));
+            }
         }
+        return null;
     }
 
     /** 将若干本子推送到本地下载服务的队列 */
@@ -251,6 +245,7 @@
             it.meta = await fetchMetaForPush(it.gid);
             if (i < items.length - 1) await new Promise(r => setTimeout(r, 350));
         }
+        const metaOk = items.filter(it => it.meta).length;
 
         const res = await serverApi('/api/tasks', 'POST', { items });
         if (!res.ok) {
@@ -269,6 +264,12 @@
             persistLocalState();
             requestRender();
         }
+        if (res.json) {
+            res.json.metaInfo = `元数据 ${metaOk}/${items.length} 随任务上传（服务端零 API 请求）`;
+        }
+        // 推送后快速同步两轮（下载通常几秒完成，及时标记「已下载」）
+        setTimeout(syncDownloadedFromServer, 4000);
+        setTimeout(syncDownloadedFromServer, 10000);
         return res.json;
     }
 
@@ -280,49 +281,58 @@
      * 即使推送后浏览器被关闭，下次打开任意 nHentai 页面 3 秒内即会补上标记，
      * 并对你推送过的任务弹「下载完成」提示。
      */
+    /**
+     * 轻量同步（每 12s + 页面加载 + 标签页激活）：服务端下载状态 → 前端标记。
+     * - 已下载数据及时同步（黄色「下载中」→ 绿色「已下载」）
+     * - 本子【刚变为已下载】的这一刻才自动取消勾选——不做持续剪枝，勾选不再莫名消失
+     */
     async function syncDownloadedFromServer() {
         if (!SERVER_KEY) return;
-        const res = await serverApi('/api/tasks', 'GET');
+        const res = await serverApi('/api/sync', 'GET');
         if (!res.ok || !res.json) return;
+        const d = res.json;
 
         const pushedMap = readPushedMap();
         let changed = false;
-        const justDone = [];      // 本次新识别为已下载、且值得提示的
-        const seen = new Set();
+        let checkedChanged = false;
+        const justDone = [];
 
-        for (const t of (res.json.tasks || [])) {
-            const gid = String(t.gid);
-            seen.add(gid);
+        // ① 已下载清单（服务端全部完成任务 ∪ 云端清单）
+        for (const gid of (d.downloadedGids || []).map(String)) {
+            if (downloadingSet.has(gid)) { downloadingSet.delete(gid); changed = true; }
+            if (downloadedSet.has(gid)) continue;
+            downloadedSet.add(gid);
+            changed = true;
 
-            if (t.status === 'completed') {
-                if (downloadingSet.has(gid)) { downloadingSet.delete(gid); changed = true; }
-                const isMine = !!pushedMap[gid];
-                if (pushedMap[gid]) delete pushedMap[gid];
-                if (downloadedSet.has(gid)) continue;
-                downloadedSet.add(gid);
-                changed = true;
-
-                // 提示条件：是本浏览器推送过的任务，或 15 分钟内刚完成（历史首次同步不打扰）
-                const finishedAt = t.finishedAt ? new Date(t.finishedAt).getTime() : 0;
-                const isRecent = finishedAt && (Date.now() - finishedAt) < 15 * 60 * 1000;
-                if (isMine || isRecent) justDone.push(t);
-            } else if (t.status === 'queued' || t.status === 'downloading') {
-                // 「下载中」黄色角标状态
-                if (!downloadingSet.has(gid)) { downloadingSet.add(gid); changed = true; }
-            } else {
-                // failed / cancelled → 取消「下载中」标记
-                if (downloadingSet.has(gid)) { downloadingSet.delete(gid); changed = true; }
+            // 本子刚变为已下载 → 自动取消该本勾选 + 换绿色角标
+            if (savedChecked[gid]) {
+                delete savedChecked[gid];
+                checkedChanged = true;
+                const cb = document.querySelector(`input[data-gid="${gid}"]`);
+                if (cb) cb.checked = false;
             }
-        }
-        // 服务端已删除的任务：清理「下载中」残留
-        for (const gid of [...downloadingSet]) {
-            if (!seen.has(gid)) { downloadingSet.delete(gid); changed = true; }
+
+            const isMine = !!pushedMap[gid];
+            const recent = (d.recentDone || []).find(r => String(r.gid) === gid);
+            const finishedAt = recent && recent.finishedAt ? new Date(recent.finishedAt).getTime() : 0;
+            const isRecent = finishedAt && (Date.now() - finishedAt) < 15 * 60 * 1000;
+            if (recent && (isMine || isRecent)) justDone.push(recent);
+            if (pushedMap[gid]) delete pushedMap[gid];
         }
 
-        if (changed) {
+        // ② 「下载中」黄色角标（快照替换）
+        const active = new Set((d.downloadingGids || []).map(String));
+        for (const gid of active) {
+            if (!downloadingSet.has(gid)) { downloadingSet.add(gid); changed = true; }
+        }
+        for (const gid of [...downloadingSet]) {
+            if (!active.has(gid) && !downloadedSet.has(gid)) { downloadingSet.delete(gid); changed = true; }
+        }
+
+        if (changed || checkedChanged) {
             localStorage.setItem('nh_pushed_gids', JSON.stringify(pushedMap));
+            if (checkedChanged) persistChecked();
             persistLocalState();
-            syncLocalState();
             requestRender();
         }
 
@@ -926,6 +936,7 @@
                 notify(`
                     <div class='title' style="color:#4caf50;">📤 已推送 ${(result.added || []).length} 本到下载服务</div>
                     <div style="font-size:12px;color:#ccc;">服务端将自动排队下载（完整性校验 + 超时重传 + 多CDN轮询）</div>
+                    ${result.metaInfo ? `<div style="font-size:11px;color:#8bc34a;margin-top:4px;">${result.metaInfo}</div>` : ''}
                     ${skipped.length ? `<div style="font-size:12px;color:#ff9800;margin-top:6px;">跳过 ${skipped.length} 本：</div>${skippedHtml}` : ''}
                 `, Infinity);
             });
@@ -1242,10 +1253,14 @@
     setTimeout(() => syncCookieToServer(true), 2500);
     setInterval(() => syncCookieToServer(false), 60000);
     setTimeout(syncDownloadedFromServer, 3000);
-    setInterval(syncDownloadedFromServer, 60000);
-    // 标签页切回前台时立即同步（长开页面也能及时感知完成）
+    setInterval(syncDownloadedFromServer, 12000);   // 轻量接口高频轮询，下载完成及时同步
+    // 标签页切回前台时：先刷新本地状态（防止后台期间其他页签变更被覆写），再立即同步
     document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') syncDownloadedFromServer();
+        if (document.visibilityState === 'visible') {
+            syncLocalState();
+            requestRender();
+            syncDownloadedFromServer();
+        }
     });
 
     if (document.readyState === 'loading') {

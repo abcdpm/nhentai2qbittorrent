@@ -327,6 +327,38 @@ function createHandler(ctx) {
                 return;
             }
 
+            // ---- 前端轻量同步（高频轮询专用：不含 pages 明细，体积小）----
+            if (pathname === '/api/sync' && method === 'GET') {
+                const s = state.get();
+                const set = new Set(s.downloadedGids);
+                const downloading = new Set();
+                const failed = [];
+                const recentDone = [];
+                const now = Date.now();
+                for (const t of store.list()) {
+                    const gid = String(t.gid);
+                    if (t.status === 'completed') {
+                        set.add(gid);
+                        const ft = t.finishedAt ? new Date(t.finishedAt).getTime() : 0;
+                        if (ft && now - ft < 24 * 3600 * 1000) {
+                            recentDone.push({ gid, title: t.title, finishedAt: t.finishedAt });
+                        }
+                    } else if (t.status === 'queued' || t.status === 'downloading') {
+                        downloading.add(gid);
+                    } else if (t.status === 'failed' || t.status === 'completed_with_errors') {
+                        failed.push({ gid, title: t.title, error: t.error });
+                    }
+                }
+                sendJson(res, 200, {
+                    ok: true,
+                    downloadedGids: [...set],
+                    downloadingGids: [...downloading],
+                    failed,
+                    recentDone
+                });
+                return;
+            }
+
             // ---- 前端状态云端持久化（nh_qb_* 字段主存储）----
             if (pathname === '/api/state' && method === 'GET') {
                 const s = state.get();

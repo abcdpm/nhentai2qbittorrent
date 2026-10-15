@@ -18,7 +18,7 @@ const { QueueManager } = require('../src/queue');
 const { createHandler } = require('../src/api');
 const { parseGalleryHtml, parseGalleryApi, fetchGalleryMeta } = require('../src/nhentai');
 const { galleryFolderName, sanitizeFileName } = require('../src/util');
-const { readZipEntries, extractZipEntry, crc32, numericNameCompare } = require('../src/zip');
+const { readZipEntries, extractZipEntry, crc32, numericNameCompare, createZipFromDir } = require('../src/zip');
 const { StateStore } = require('../src/state');
 
 /**************************************************************************
@@ -861,6 +861,110 @@ test('POST /api/cdn/test：CDN 节点延迟测量（含不可达节点）', asyn
         assert.ok(d.results[1].ok, '第二个节点可达');
         const bad = d.results.find(r => r.url.includes('unreachable'));
         assert.ok(bad && !bad.ok, '不可达节点应标记失败');
+    } finally {
+        server.close();
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('部分失败重试：仅重新下载失败的页（成功页不重复请求）', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    mock.plan('2.png', ['500', '500']);   // 首轮两个节点均失败
+    const env = makeEnv(mock);
+    env.config.data.maxAttempts = 1;
+    env.config.data.repairRounds = 0;
+    try {
+        const { added } = env.queue.enqueue([{
+            gid: '123001', title: '[作者A] 测试本子标题',
+            meta: { mediaId: '900001', numPages: 3, extMap: ['jpg', 'png', 'webp'], coverHost: null }
+        }]);
+        env.queue.start();
+        const task = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 15000, '首次下载');
+        assert.strictEqual(task.status, 'completed_with_errors', '应为部分失败');
+        assert.strictEqual(task.done, 2);
+        assert.strictEqual(task.failed, 1);
+
+        const hitsOf = (f) => mock.state.hits.filter(h => h.file === f).length;
+        const before = { '1.jpg': hitsOf('1.jpg'), '2.png': hitsOf('2.png'), '3.webp': hitsOf('3.webp') };
+
+        env.queue.retry(task.id);
+        const done = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t.status === 'completed' ? t : null;
+        }, 15000, '补齐完成');
+        assert.strictEqual(done.done, 3, '补齐后全部完成');
+        assert.strictEqual(hitsOf('1.jpg'), before['1.jpg'], '成功页不应重复请求');
+        assert.strictEqual(hitsOf('3.webp'), before['3.webp'], '成功页不应重复请求');
+        assert.ok(hitsOf('2.png') > before['2.png'], '仅失败页被重新请求');
+    } finally {
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('zip 打包排除 SMB/FUSE 垃圾文件（.fuse_hidden / Thumbs.db / .part）', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    env.config.data.zipAfterVerify = true;
+    env.config.data.keepFolderAfterZip = true;
+    try {
+        const { added } = env.queue.enqueue([{
+            gid: '123001', title: '[作者A] 测试本子标题',
+            meta: { mediaId: '900001', numPages: 3, extMap: ['jpg', 'png', 'webp'], coverHost: null }
+        }]);
+        env.queue.start();
+        await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 15000, '任务完成');
+
+        const dir = path.join(env.config.get('downloadDir'), '[作者A] 测试本子标题 [123001]');
+        // 模拟 SMB/FUSE 挂载产生的垃圾文件
+        fs.writeFileSync(path.join(dir, '.fuse_hidden0a798aec0000b986'), 'junk');
+        fs.writeFileSync(path.join(dir, 'Thumbs.db'), 'junk');
+        fs.writeFileSync(path.join(dir, 'desktop.ini'), 'junk');
+        fs.writeFileSync(path.join(dir, '5.part'), 'junk');
+
+        const zipPath = path.join(env.config.get('downloadDir'), 'junk-test.zip');
+        const r = createZipFromDir(dir, zipPath);
+        assert.strictEqual(r.entries, 3, '垃圾文件与 .part 不应进包');
+        assert.deepStrictEqual(readZipEntries(zipPath).map(e => e.name), ['1.jpg', '2.png', '3.webp']);
+    } finally {
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('GET /api/sync：轻量同步接口（已下载/下载中/失败/最近完成，无 pages 明细）', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    const keys = new KeyStore(env.tmp, env.logger);
+    const created = keys.create('测试密钥');
+    const handler = createHandler({
+        config: env.config, store: env.store, keys, queue: env.queue,
+        logger: env.logger, downloader: env.downloader, state: new StateStore(env.tmp)
+    });
+    const server = http.createServer((req, res) => handler(req, res).catch(() => { res.writeHead(500); res.end(); }));
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+        env.store.add({ id: 'c1', gid: '111', status: 'completed', title: 'T1', folder: 'f', pages: [{ n: 1 }], createdAt: '2026-01-01T00:00:00Z', finishedAt: new Date().toISOString() });
+        env.store.add({ id: 'q1', gid: '222', status: 'queued', title: 'T2', folder: 'f', pages: [], createdAt: '2026-01-01T00:00:00Z' });
+        env.store.add({ id: 'f1', gid: '333', status: 'failed', title: 'T3', folder: 'f', pages: [], createdAt: '2026-01-01T00:00:00Z', error: 'boom' });
+
+        const res = await fetch(base + '/api/sync', { headers: { 'X-API-Key': created.raw } });
+        assert.strictEqual(res.status, 200);
+        const raw = await res.text();
+        assert.ok(!raw.includes('"pages"'), '轻量接口不应包含 pages 明细');
+        const d = JSON.parse(raw);
+        assert.ok(d.downloadedGids.includes('111'));
+        assert.ok(d.downloadingGids.includes('222'));
+        assert.ok((d.failed || []).some(f => f.gid === '333' && f.error === 'boom'));
+        assert.ok((d.recentDone || []).some(x => x.gid === '111' && x.title === 'T1'));
     } finally {
         server.close();
         await env.queue.stop();

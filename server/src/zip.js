@@ -38,9 +38,21 @@ function numericNameCompare(a, b) {
     return a < b ? -1 : (a > b ? 1 : 0);
 }
 
+/**
+ * 列出目录内应打包的文件：
+ * 排除 .part 残留与 SMB/FUSE/系统垃圾文件（如 .fuse_hidden*、Thumbs.db、desktop.ini、@eaDir、._*）
+ * ——这些文件会污染压缩包条目校验、并阻止文件夹删除。
+ */
 function listFilesSorted(dir) {
+    const JUNK = /^(thumbs\.db|desktop\.ini|\._|\.ds_store|\.fuse_hidden)/i;
     return fs.readdirSync(dir)
-        .filter(f => !f.endsWith('.part') && fs.statSync(path.join(dir, f)).isFile())
+        .filter(f => {
+            if (f.endsWith('.part')) return false;
+            if (f.startsWith('.')) return false;         // 隐藏文件（含 .fuse_hidden*）
+            if (JUNK.test(f)) return false;
+            if (f === '@eaDir') return false;
+            try { return fs.statSync(path.join(dir, f)).isFile(); } catch (e) { return false; }
+        })
         .sort(numericNameCompare);
 }
 
