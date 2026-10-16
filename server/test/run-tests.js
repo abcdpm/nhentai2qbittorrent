@@ -31,7 +31,8 @@ function createMockSite(galleries) {
         plans: new Map(),
         hits: [],
         pending: [],
-        metaHits: []
+        metaHits: [],
+        lrrUploads: []
     };
 
     function planFor(hostSeg, file) {
@@ -62,6 +63,31 @@ function createMockSite(galleries) {
 </body></html>`;
             res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
             res.end(html);
+            return;
+        }
+
+        if (parts[0] === 'api' && parts[1] === 'archives') {
+            // LANraragi 模拟：PUT /api/archives/upload、GET /api/archives
+            let bodyBuf = Buffer.alloc(0);
+            req.on('data', c => { bodyBuf = Buffer.concat([bodyBuf, c]); });
+            req.on('end', () => {
+                if (parts[2] === 'upload') {
+                    state.lrrUploads.push({
+                        auth: req.headers.authorization || '',
+                        method: req.method,
+                        size: bodyBuf.length,
+                        hasZipName: bodyBuf.includes('.zip'),
+                        hasTitle: bodyBuf.includes('测试本子标题'),
+                        hasSource: bodyBuf.includes('source:nhentai.net/g/'),
+                        hasSha1Field: bodyBuf.includes('file_checksum')
+                    });
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify({ arcid: 'a'.repeat(40), success: 1 }));
+                } else {
+                    res.writeHead(200, { 'Content-Type': 'application/json' });
+                    res.end(JSON.stringify([{ arcid: 'x'.repeat(40) }]));
+                }
+            });
             return;
         }
 
@@ -967,6 +993,41 @@ test('GET /api/sync：轻量同步接口（已下载/下载中/失败/最近完�
         assert.ok((d.recentDone || []).some(x => x.gid === '111' && x.title === 'T1'));
     } finally {
         server.close();
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('压缩后自动上传 LANraragi（Bearer 认证 / 标题 / source 标签 / SHA1）', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    env.config.data.zipAfterVerify = true;
+    env.config.data.lrrUrl = `http://127.0.0.1:${mock.port}`;
+    env.config.data.lrrApiKey = 'secret';
+    try {
+        const { added } = env.queue.enqueue([{
+            gid: '123001', title: '[作者A] 测试本子标题',
+            meta: { mediaId: '900001', numPages: 3, extMap: ['jpg', 'png', 'webp'], coverHost: null }
+        }]);
+        env.queue.start();
+        const task = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 20000, '任务完成');
+
+        assert.strictEqual(task.status, 'completed');
+        assert.ok(task.lrrUploaded && task.lrrUploaded.arcid, '任务应记录 LRR 上传结果');
+        assert.ok(!task.lrrError, '不应有上传错误');
+
+        const up = mock.state.lrrUploads[0];
+        assert.ok(up, 'LANraragi 应收到上传请求');
+        assert.strictEqual(up.method, 'PUT');
+        assert.strictEqual(up.auth, 'Bearer ' + Buffer.from('secret', 'utf8').toString('base64'), '认证头应为 Bearer base64(api_key)');
+        assert.ok(up.hasZipName && up.size > 0, '应上传 zip 文件');
+        assert.ok(up.hasTitle, '应携带标题');
+        assert.ok(up.hasSource, '应携带 source:nhentai.net/g/ 标签（与 LRR 插件闭环）');
+        assert.ok(up.hasSha1Field, '应携带 SHA1 校验字段');
+    } finally {
         await env.queue.stop();
         mock.close();
     }

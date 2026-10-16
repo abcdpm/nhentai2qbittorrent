@@ -136,6 +136,16 @@
                         <label class="field check"><input type="checkbox" id="set-zipAfterVerify"><span>校验通过后压缩为 zip（名称同样以 [id] 结尾，可直接导入 LANraragi）</span></label>
                         <label class="field check"><input type="checkbox" id="set-keepFolderAfterZip"><span>压缩后保留原图片文件夹（默认删除，仅保留 zip）</span></label>
                     </div>
+                    <h3>LANraragi 联动（压缩后自动上传）</h3>
+                    <div class="form-grid">
+                        <label class="field span2"><span>LANraragi 地址（如 http://127.0.0.1:3000；留空=禁用）</span><input type="text" id="set-lrrUrl" placeholder="留空禁用"></label>
+                        <label class="field"><span>API Key（LRR → 设置 生成）</span><input type="text" id="set-lrrApiKey" placeholder="可选"></label>
+                        <label class="field"><span>分类 ID（可选）</span><input type="text" id="set-lrrCategory" placeholder="可选"></label>
+                        <div class="field span2">
+                            <button id="btn-lrr-test" class="btn">🔌 测试 LANraragi 连接</button>
+                            <span id="lrr-test-status" class="muted small"></span>
+                        </div>
+                    </div>
                     <div class="form-actions">
                         <button id="btn-save-settings" class="btn primary">保存设置</button>
                         <span id="settings-msg" class="muted small"></span>

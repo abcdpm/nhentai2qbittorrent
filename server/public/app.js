@@ -240,7 +240,7 @@
     /* ---------- 设置 ---------- */
     const SETTINGS_FIELDS = ['downloadDir', 'requestIntervalMs', 'galleryIntervalMs', 'pageConcurrency',
         'timeoutMs', 'maxAttempts', 'retryDelayMs', 'repairRounds', 'webpQuality',
-        'metaUrlTemplate', 'nhCookie', 'userAgent'];
+        'metaUrlTemplate', 'nhCookie', 'userAgent', 'lrrUrl', 'lrrApiKey', 'lrrCategory'];
 
     async function loadSettings() {
         try {
@@ -493,6 +493,23 @@
 
         $('#btn-save-settings').addEventListener('click', saveSettings);
         $('#btn-cdn-test').addEventListener('click', testCdn);
+        $('#btn-lrr-test').addEventListener('click', async () => {
+            const st = $('#lrr-test-status');
+            st.textContent = '🔌 测试中…';
+            try {
+                const d = await api('/api/lrr/test', {
+                    method: 'POST',
+                    body: {
+                        lrrUrl: $('#set-lrrUrl').value.trim(),
+                        lrrApiKey: $('#set-lrrApiKey').value.trim(),
+                        lrrCategory: $('#set-lrrCategory').value.trim()
+                    }
+                });
+                st.textContent = d.ok ? `✓ 连接成功（LANraragi 现有 ${d.count} 个本子）` : `✗ ${esc(d.error || '连接失败')}`;
+            } catch (e) {
+                st.textContent = '✗ ' + esc(e.message);
+            }
+        });
         $('#btn-create-key').addEventListener('click', createKey);
 
         // 历史下载记录

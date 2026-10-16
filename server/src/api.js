@@ -261,6 +261,26 @@ function createHandler(ctx) {
                 return;
             }
 
+            // ---- LANraragi 连通性测试（可传当前表单值，未传则用已保存配置）----
+            if (pathname === '/api/lrr/test' && method === 'POST') {
+                const body = await readBody(req).catch(() => ({}));
+                const base = String(body.lrrUrl !== undefined ? body.lrrUrl : (config.get('lrrUrl') || ''))
+                    .trim().replace(/\/+$/, '');
+                if (!base) { sendJson(res, 400, { ok: false, error: '未配置 LANraragi 地址' }); return; }
+                try {
+                    const headers = {};
+                    const apiKey = String(body.lrrApiKey !== undefined ? body.lrrApiKey : (config.get('lrrApiKey') || '')).trim();
+                    if (apiKey) headers['Authorization'] = 'Bearer ' + Buffer.from(apiKey, 'utf8').toString('base64');
+                    const r = await fetch(base + '/api/archives', { headers, signal: AbortSignal.timeout(8000) });
+                    if (!r.ok) { sendJson(res, 200, { ok: false, error: `HTTP ${r.status}${r.status === 401 ? '（API Key 无效？）' : ''}` }); return; }
+                    const arr = await r.json().catch(() => []);
+                    sendJson(res, 200, { ok: true, count: Array.isArray(arr) ? arr.length : 0 });
+                } catch (e) {
+                    sendJson(res, 200, { ok: false, error: e.message });
+                }
+                return;
+            }
+
             // ---- Cookie 同步（油猴脚本自动上传浏览器 Cookie，解除 Cloudflare 403）----
             if (pathname === '/api/cookie' && method === 'POST') {
                 const body = await readBody(req);

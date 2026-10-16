@@ -1,7 +1,8 @@
 'use strict';
 const fs = require('fs');
 const path = require('path');
-const { sleep, parseRetryAfter, formatBytes } = require('./util');
+const crypto = require('crypto');
+const { sleep, parseRetryAfter, formatBytes, nowIso } = require('./util');
 const { fetchGalleryMeta } = require('./nhentai');
 const { createZipFromDir, readZipEntries } = require('./zip');
 
@@ -93,7 +94,47 @@ class WebpConverter {
     }
 }
 
-/** 删除文件夹（SMB/FUSE 占用场景下重试 3 次），返回是否成功 */
+/**
+ * 上传 zip 到 LANraragi（PUT /api/archives/upload）。
+ * 附带 title / tags(source:…) / SHA1 校验；失败抛错，由调用方决定是否影响任务。
+ */
+async function uploadToLanraragi(zipPath, task, cfg, logger) {
+    const base = String(cfg.get('lrrUrl') || '').trim().replace(/\/+$/, '');
+    if (!base) return null;
+    const log = (m) => { if (logger) logger.info(`[gid:${task.gid}] ${m}`); };
+
+    const buf = fs.readFileSync(zipPath);
+    const form = new FormData();
+    form.append('file', new Blob([buf], { type: 'application/zip' }), path.basename(zipPath));
+    form.append('title', task.title || task.folder);
+    form.append('tags', `source:nhentai.net/g/${task.gid}`);
+    const cat = String(cfg.get('lrrCategory') || '').trim();
+    if (cat) form.append('category_id', cat);
+    form.append('file_checksum', crypto.createHash('sha1').update(buf).digest('hex'));
+
+    const headers = {};
+    const apiKey = String(cfg.get('lrrApiKey') || '').trim();
+    if (apiKey) headers['Authorization'] = 'Bearer ' + Buffer.from(apiKey, 'utf8').toString('base64');
+
+    log(`正在上传 LANraragi: ${path.basename(zipPath)} (${formatBytes(buf.length)})…`);
+    const res = await fetch(base + '/api/archives/upload', {
+        method: 'PUT',
+        headers,
+        body: form,
+        signal: AbortSignal.timeout(180000)
+    });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${text.slice(0, 160)}`);
+    let json = null;
+    try { json = JSON.parse(text); } catch (e) { /* 非 JSON 响应 */ }
+    const arcid = json && (json.arcid || json.id);
+    log(`已上传 LANraragi${arcid ? ` (arcid: ${arcid})` : ''}`);
+    return json || {};
+}
+
+/**
+ * 删除文件夹（SMB/FUSE 占用场景下重试 3 次），返回是否成功
+ */
 async function removeDirWithRetry(dir) {
     for (let i = 1; i <= 3; i++) {
         try {
@@ -140,20 +181,28 @@ class Downloader {
     }
 
     /**
-     * 下载单页。
-     * 策略：每一轮把所有 CDN 节点轮询一遍（超时/失败立即换下一节点），
-     * 整轮失败则退避后进入下一轮，最多 maxAttempts 轮（超时重传）。
+     * 下载单页（详细日志版）。
+     * 策略：每一轮把所有 CDN 节点轮询一遍（超时/失败立即换下一节点）；
+     * 404 时在同一节点内依次尝试其它后缀兜底（HTML 源后缀表偶有偏差）；
+     * 整轮失败退避后进入下一轮，最多 maxAttempts 轮。
      */
     async _downloadPage(ctx, n, ext) {
         const { dir, meta, signal } = ctx;
         const hosts = ctx.hosts;
         const cfg = this.config;
+        const info = (m) => { if (this.logger) this.logger.info(`[gid:${meta.gid}] ${m}`); };
+        const warn = (m) => { if (this.logger) this.logger.warn(`[gid:${meta.gid}] ${m}`); };
+        const dbg = (m) => { if (this.logger) this.logger.debug(`[gid:${meta.gid}] ${m}`); };
+
         const maxRounds = Math.max(1, cfg.get('maxAttempts'));
         const timeoutMs = cfg.get('timeoutMs');
-        const knownExt = !!ext;
-        const extCandidates = ext ? [ext] : ['webp', 'jpg', 'png', 'gif'];
+        const ALL_EXTS = ['webp', 'jpg', 'png', 'gif'];
+        // 后缀候选：meta 指定的优先；404 时依次尝试其它后缀兜底
+        const extCandidates = ext ? [ext, ...ALL_EXTS.filter(e => e !== ext)] : ALL_EXTS;
         let lastError = '未知错误';
         const startIdx = (n - 1) % hosts.length;
+        let attempt = 0;
+        const maxAttempts = maxRounds * hosts.length * extCandidates.length;
 
         for (let round = 1; round <= maxRounds; round++) {
             for (let h = 0; h < hosts.length; h++) {
@@ -161,8 +210,10 @@ class Downloader {
                 const base = hosts[(startIdx + h + round - 1) % hosts.length];
 
                 for (const tryExt of extCandidates) {
+                    attempt++;
                     const url = `${base}/galleries/${meta.mediaId}/${n}.${tryExt}`;
                     await this._gate();
+                    const t0 = Date.now();
                     try {
                         const res = await fetch(url, {
                             headers: Object.assign({
@@ -172,43 +223,63 @@ class Downloader {
                             }, cfg.get('nhCookie') ? { 'Cookie': cfg.get('nhCookie') } : {}),
                             signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)])
                         });
+                        const ms = Date.now() - t0;
 
                         if (res.status === 404) {
-                            lastError = `404 (${base})`;
-                            if (knownExt) break;   // 官方后缀表可信：404 视为节点问题，换下一节点
-                            continue;               // 探测模式：换下一个后缀
+                            lastError = `404 ${url}`;
+                            warn(`页${n} 尝试${attempt}/${maxAttempts} · ${url} → 404 (${ms}ms)`);
+                            continue;   // 换下一个后缀兜底
                         }
                         if (res.status === 429) {
                             const ra = parseRetryAfter(res);
-                            lastError = `429 限流 (${base})`;
+                            lastError = `429 限流 ${url}`;
+                            warn(`页${n} 尝试${attempt}/${maxAttempts} · ${url} → 429 限流 (${ms}ms)，退避 ${ra || 5}s 换节点`);
                             await sleep(Math.min((ra || 5) * 1000, 60000));
                             break;
                         }
                         if (!res.ok) {
-                            lastError = `HTTP ${res.status} (${base})`;
+                            lastError = `HTTP ${res.status} ${url}`;
+                            warn(`页${n} 尝试${attempt}/${maxAttempts} · ${url} → HTTP ${res.status} (${ms}ms)`);
                             break;
                         }
 
                         const buf = Buffer.from(await res.arrayBuffer());
-                        if (buf.length < 128) throw new Error(`内容过小 (${buf.length}B)`);
-                        if (!sniffMagic(buf, tryExt)) throw new Error('文件头校验失败（内容不是有效图片）');
+                        if (buf.length < 128) {
+                            const err = new Error(`内容过小 (${buf.length}B)`);
+                            err.contentError = true;
+                            throw err;
+                        }
+                        if (!sniffMagic(buf, tryExt)) {
+                            const err = new Error(`文件头校验失败（不是有效 ${tryExt}）`);
+                            err.contentError = true;
+                            throw err;
+                        }
 
                         const fileName = `${n}.${tryExt}`;
                         const filePath = path.join(dir, fileName);
                         const tmpPath = filePath + '.part';
                         fs.writeFileSync(tmpPath, buf);
                         fs.renameSync(tmpPath, filePath);
+                        if (ext && tryExt !== ext) {
+                            warn(`页${n} meta 后缀 .${ext} 与实际不符，已按 .${tryExt} 保存`);
+                        }
+                        dbg(`页${n} ✓ · ${url} · ${formatBytes(buf.length)} (第${attempt}次尝试, ${ms}ms)`);
                         return { file: fileName, bytes: buf.length };
                     } catch (e) {
                         if (signal && signal.aborted) throw new Error('已取消');
+                        const ms = Date.now() - t0;
                         lastError = (e.name === 'TimeoutError' || e.name === 'AbortError')
-                            ? `超时 (${timeoutMs}ms, ${base})`
-                            : `${e.message} (${base})`;
+                            ? `超时(>${timeoutMs}ms) ${url}`
+                            : `${e.message} · ${url}`;
+                        warn(`页${n} 尝试${attempt}/${maxAttempts} · ${url} → ${lastError} (${ms}ms)`);
+                        if (!e.contentError) break;   // 网络/超时类错误 → 换下一节点（同后缀）重传
+                        // 内容类错误（文件头不符等）→ 继续尝试其它后缀
                     }
                 }
             }
             if (round < maxRounds) {
                 const backoff = cfg.get('retryDelayMs') * round + Math.floor(Math.random() * 500);
+                info(`页${n} 第${round}/${maxRounds}轮所有节点未成功，${backoff}ms 后进入下一轮`);
                 await sleep(backoff);
             }
         }
@@ -366,6 +437,16 @@ class Downloader {
                             log(`⚠ ${task.zipError}`);
                         }
                     }
+                    // 联动 LANraragi：压缩成功后自动上传（失败不影响任务本身）
+                    if (String(cfg.get('lrrUrl') || '').trim()) {
+                        try {
+                            const lrr = await uploadToLanraragi(zipPath, task, cfg, this.logger);
+                            task.lrrUploaded = { arcid: (lrr && (lrr.arcid || lrr.id)) || null, at: nowIso() };
+                        } catch (e) {
+                            task.lrrError = e.message;
+                            if (this.logger) this.logger.warn(`[gid:${task.gid}] ⚠ LANraragi 上传失败（不影响本任务）: ${e.message}`);
+                        }
+                    }
                 }
             } catch (e) {
                 task.zipError = e.message;
@@ -374,7 +455,11 @@ class Downloader {
         }
         onProgress(task);
 
-        log(`结束：成功 ${task.done}/${task.total}，失败 ${task.failed}`);
+        const failedPages = task.pages.filter(p => p.status !== 'done');
+        log(`结束：成功 ${task.done}/${task.total}，失败 ${task.failed}` +
+            (failedPages.length
+                ? `；失败页明细: ${failedPages.map(p => `${p.n}页(${p.error || '未知原因'})`).join('、')}`
+                : ''));
         return {
             ok: task.failed === 0 && task.done > 0,
             done: task.done,

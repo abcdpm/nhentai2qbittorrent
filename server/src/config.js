@@ -24,6 +24,10 @@ const DEFAULTS = {
     // 压缩（完整性校验通过后打包为 zip，可直接导入 LANraragi）
     zipAfterVerify: true,       // 校验通过后压缩为 "本子名 [id].zip"
     keepFolderAfterZip: false,  // 压缩后是否保留原图片文件夹
+    // LANraragi 联动（压缩后自动上传）
+    lrrUrl: '',                 // LANraragi 地址，如 http://127.0.0.1:3000；留空=禁用
+    lrrApiKey: '',              // LANraragi 设置里的 API Key（自动 base64 后放入 Authorization）
+    lrrCategory: '',            // 可选：上传到指定分类 ID
     // 源站适配（高级项，一般无需修改；测试/镜像时可覆盖）
     metaUrlTemplate: 'https://nhentai.net/g/{gid}/',
     apiUrlTemplate: '',         // 留空=不使用官方 API（限流严重，不推荐）；如需可填 https://nhentai.net/api/v2/galleries/{gid}
