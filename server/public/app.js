@@ -38,6 +38,35 @@
         return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
+    /* ---------- 页面内确认弹窗（替代浏览器原生 confirm）---------- */
+    function showConfirm({ title = '确认操作', message = '', okText = '确定', danger = true, icon = '🗑️' } = {}) {
+        return new Promise((resolve) => {
+            const mask = $('#confirm-mask');
+            $('#confirm-title').textContent = title;
+            $('#confirm-message').innerHTML = message;
+            $('#confirm-icon').textContent = icon;
+            const okBtn = $('#confirm-ok');
+            okBtn.textContent = okText;
+            okBtn.className = 'btn ' + (danger ? 'danger' : 'primary');
+            mask.classList.remove('hidden');
+
+            const onKey = (e) => {
+                if (e.key === 'Escape') done(false);
+                else if (e.key === 'Enter') done(true);
+            };
+            const done = (v) => {
+                mask.classList.add('hidden');
+                document.removeEventListener('keydown', onKey);
+                resolve(v);
+            };
+            document.addEventListener('keydown', onKey);
+            $('#confirm-cancel').onclick = () => done(false);
+            okBtn.onclick = () => done(true);
+            mask.onclick = (e) => { if (e.target === mask) done(false); };
+            okBtn.focus();
+        });
+    }
+
     function toast(msg, type = '') {
         const wrap = $('#toast-wrap');
         const el = document.createElement('div');
@@ -468,7 +497,13 @@
         $('#btn-clear-done').addEventListener('click', async () => {
             const done = (state.counts && state.counts.completed) || 0;
             if (!done) { toast('没有已下载的任务记录'); return; }
-            if (!confirm(`确定清空 ${done} 条已下载任务记录？\n（磁盘上的 zip / 文件不会被删除）`)) return;
+            const ok = await showConfirm({
+                title: '清空已下载',
+                icon: '🗑️',
+                okText: '清空',
+                message: `确定清空 <b>${done}</b> 条已下载任务记录？<br><span class="muted small">磁盘上的 zip / 文件不会被删除</span>`
+            });
+            if (!ok) return;
             try {
                 const d = await api('/api/queue/clear-completed', { method: 'POST' });
                 toast(`已清空 ${d.removed} 条已下载记录`, 'ok');
@@ -536,7 +571,13 @@
         $('#key-table').addEventListener('click', async (e) => {
             const btn = e.target.closest('button[data-key-revoke]');
             if (!btn) return;
-            if (!confirm('确定吊销此密钥？使用该密钥的客户端将立即失去访问权限。')) return;
+            const ok = await showConfirm({
+                title: '吊销 API 密钥',
+                icon: '🔑',
+                okText: '吊销',
+                message: '确定吊销此密钥？<br><span class="muted small">使用该密钥的客户端将立即失去访问权限</span>'
+            });
+            if (!ok) return;
             try {
                 await api('/api/keys/' + btn.dataset.keyRevoke, { method: 'DELETE' });
                 toast('密钥已吊销', 'ok');

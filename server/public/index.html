@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nHentai 下载服务</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=5.0.5">
 </head>
 <body>
 
@@ -141,7 +141,8 @@
                         <label class="field span2"><span>LANraragi 地址（如 http://127.0.0.1:3000；留空=禁用）</span><input type="text" id="set-lrrUrl" placeholder="留空禁用"></label>
                         <label class="field"><span>API Key（LRR → 设置 生成）</span><input type="text" id="set-lrrApiKey" placeholder="可选"></label>
                         <label class="field"><span>分类 ID（可选）</span><input type="text" id="set-lrrCategory" placeholder="可选"></label>
-                        <div class="field span-all">
+                        <div class="field span2">
+                            <span>连接测试</span>
                             <div class="inline-row">
                                 <button id="btn-lrr-test" class="btn">🔌 测试 LANraragi 连接</button>
                                 <span id="lrr-test-status" class="muted small"></span>
@@ -242,6 +243,19 @@
 </div>
 
 <div id="toast-wrap"></div>
-<script src="app.js"></script>
+
+<!-- 通用确认弹窗（替代浏览器原生 confirm） -->
+<div id="confirm-mask" class="modal-mask hidden">
+    <div class="modal">
+        <div class="modal-icon" id="confirm-icon">🗑️</div>
+        <h3 id="confirm-title">确认操作</h3>
+        <div id="confirm-message" class="modal-msg"></div>
+        <div class="modal-actions">
+            <button id="confirm-cancel" class="btn">取消</button>
+            <button id="confirm-ok" class="btn danger">确定</button>
+        </div>
+    </div>
+</div>
+<script src="app.js?v=5.0.5"></script>
 </body>
 </html>

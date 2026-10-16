@@ -260,6 +260,25 @@ code {
     font-family: ui-monospace, Consolas, monospace;
 }
 
+/* ---------- 确认弹窗（替代原生 confirm）---------- */
+.modal-mask {
+    position: fixed; inset: 0; z-index: 300;
+    background: rgba(0, 0, 0, .55); backdrop-filter: blur(4px);
+    display: flex; align-items: center; justify-content: center;
+}
+.modal {
+    width: min(420px, calc(100vw - 40px));
+    background: var(--panel); border: 1px solid var(--border); border-radius: 16px;
+    padding: 28px 26px 22px; text-align: center; box-shadow: var(--shadow);
+    animation: modalPop .22s ease;
+}
+@keyframes modalPop { from { opacity: 0; transform: translateY(14px) scale(.96); } to { opacity: 1; transform: none; } }
+.modal-icon { font-size: 42px; margin-bottom: 10px; }
+.modal h3 { margin: 0 0 10px; font-size: 17px; }
+.modal-msg { color: var(--muted); font-size: 13px; line-height: 1.9; margin-bottom: 22px; }
+.modal-actions { display: flex; gap: 10px; }
+.modal-actions .btn { flex: 1; padding: 11px 0; }
+
 /* ---------- Toast ---------- */
 #toast-wrap { position: fixed; top: 20px; right: 20px; z-index: 200; display: flex; flex-direction: column; gap: 10px; }
 .toast {

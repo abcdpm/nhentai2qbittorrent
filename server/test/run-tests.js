@@ -1175,7 +1175,7 @@ test('Web 界面与静态资源可访问（无需密钥）', async () => {
         assert.strictEqual(idx.status, 200);
         const html = await idx.text();
         assert.ok(html.includes('nHentai 下载服务'));
-        assert.ok(html.includes('href="style.css"') && html.includes('src="app.js"') && html.includes('href="favicon.svg"'),
+        assert.ok(html.includes('href="style.css') && html.includes('src="app.js') && html.includes('href="favicon.svg"'),
             '静态资源应使用相对路径（支持 /nhentai 子路径反代）');
         const css = await fetch(base + '/style.css');
         assert.strictEqual(css.status, 200);
