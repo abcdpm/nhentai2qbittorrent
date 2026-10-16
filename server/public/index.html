@@ -141,9 +141,11 @@
                         <label class="field span2"><span>LANraragi 地址（如 http://127.0.0.1:3000；留空=禁用）</span><input type="text" id="set-lrrUrl" placeholder="留空禁用"></label>
                         <label class="field"><span>API Key（LRR → 设置 生成）</span><input type="text" id="set-lrrApiKey" placeholder="可选"></label>
                         <label class="field"><span>分类 ID（可选）</span><input type="text" id="set-lrrCategory" placeholder="可选"></label>
-                        <div class="field span2">
-                            <button id="btn-lrr-test" class="btn">🔌 测试 LANraragi 连接</button>
-                            <span id="lrr-test-status" class="muted small"></span>
+                        <div class="field span-all">
+                            <div class="inline-row">
+                                <button id="btn-lrr-test" class="btn">🔌 测试 LANraragi 连接</button>
+                                <span id="lrr-test-status" class="muted small"></span>
+                            </div>
                         </div>
                     </div>
                     <div class="form-actions">
@@ -159,8 +161,8 @@
                         <label class="field span2"><span>浏览器 Cookie（油猴脚本自动同步；也可手动粘贴）</span><input type="text" id="set-nhCookie" placeholder="可选"></label>
                         <label class="field check"><input type="checkbox" id="set-preferCoverHost"><span>优先使用封面所在 CDN 节点</span></label>
                         <label class="field span2"><span>CDN 节点列表（每行一个）</span><textarea id="set-cdnBaseUrls" rows="6" spellcheck="false"></textarea></label>
-                        <div class="field span2">
-                            <div class="cdn-test-row">
+                        <div class="field span-all">
+                            <div class="inline-row">
                                 <button id="btn-cdn-test" class="btn">📡 CDN 测速</button>
                                 <span id="cdn-test-status" class="muted small"></span>
                             </div>

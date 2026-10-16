@@ -151,6 +151,8 @@ code {
 
 /* CDN 测速 */
 .cdn-test-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.inline-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.span-all { grid-column: 1 / -1; }
 .lat-good { color: #2ecc71; }
 .lat-mid { color: #f5b942; }
 .lat-bad { color: #ff5b6e; }
