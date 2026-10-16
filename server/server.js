@@ -19,6 +19,7 @@ const { TaskStore } = require('./src/store');
 const { Downloader } = require('./src/downloader');
 const { QueueManager } = require('./src/queue');
 const { StateStore } = require('./src/state');
+const { FolderJanitor } = require('./src/janitor');
 const { createHandler } = require('./src/api');
 
 const ROOT = __dirname;
@@ -51,12 +52,19 @@ function bootstrap() {
     const recovered = store.recoverInterrupted();
     if (recovered > 0) logger.info(`已恢复 ${recovered} 个中断的下载任务`);
 
-    const downloader = new Downloader(config, logger);
+    const janitor = new FolderJanitor({
+        dataDir: DATA_DIR,
+        downloadDir: config.get('downloadDir'),
+        logger
+    });
+    janitor.start();
+
+    const downloader = new Downloader(config, logger, janitor);
     const queue = new QueueManager(store, config, logger, downloader);
     queue.start();
 
     const state = new StateStore(DATA_DIR);
-    const handler = createHandler({ config, store, keys, queue, logger, downloader, state });
+    const handler = createHandler({ config, store, keys, queue, logger, downloader, state, janitor });
     const server = http.createServer((req, res) => {
         handler(req, res).catch(e => {
             logger.error(`未捕获的请求异常: ${e.message}`);
@@ -80,6 +88,7 @@ function bootstrap() {
         logger.info(`收到 ${signal}，正在退出...`);
         server.close();
         await queue.stop();
+        janitor.stop();
         store.flush();
         process.exit(0);
     }

@@ -20,6 +20,7 @@ const { parseGalleryHtml, parseGalleryApi, fetchGalleryMeta } = require('../src/
 const { galleryFolderName, sanitizeFileName } = require('../src/util');
 const { readZipEntries, extractZipEntry, crc32, numericNameCompare, createZipFromDir } = require('../src/zip');
 const { StateStore } = require('../src/state');
+const { FolderJanitor } = require('../src/janitor');
 
 /**************************************************************************
  * mock 源站：/g/:gid/ 详情页 + /:cdn/galleries/:media/:file 图片
@@ -1102,6 +1103,59 @@ test('非图片内容（拦截页）→ 报错含 content-type 与文件头十�
         await env.queue.stop();
         mock.close();
     }
+});
+
+test('残留文件夹清理：占用释放后自动删除（周期检测 + 队列持久化重启续跑）', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nh-janitor-'));
+    const downloads = path.join(tmp, 'dl');
+    fs.mkdirSync(downloads);
+    const dir1 = path.join(downloads, '残留本子 [123]');
+    fs.mkdirSync(dir1);
+    fs.writeFileSync(path.join(dir1, '1.jpg'), 'x');
+    fs.writeFileSync(path.join(downloads, '残留本子 [123].zip'), 'zipdata');
+    fs.writeFileSync(path.join(downloads, '残留本子 [123].zip.part'), 'junk');
+
+    // 模拟占用：第一次删除抛 EBUSY，之后成功
+    let calls = 0;
+    const mk = (rmFn) => new FolderJanitor({
+        dataDir: tmp, downloadDir: downloads, logger: null, intervalMs: 60000, rmFn
+    });
+    const janitor = mk((d) => {
+        calls++;
+        if (calls < 2) throw new Error('EBUSY: .fuse_hidden 占用中');
+        fs.rmSync(d, { recursive: true, force: true });
+    });
+
+    janitor.enqueue(dir1, { gid: '123', folder: '残留本子 [123]', zip: '残留本子 [123].zip' });
+    janitor.enqueue(dir1, { gid: '123' });   // 重复入队应去重
+    assert.strictEqual(janitor.pending(), 1, '重复入队应去重');
+
+    await janitor._tick();
+    assert.ok(fs.existsSync(dir1), '占用中不应删除');
+    assert.strictEqual(janitor.pending(), 1, '失败保留在队列继续重试');
+    assert.ok(!fs.existsSync(path.join(downloads, '残留本子 [123].zip.part')), '顺带清理 .zip.part 残留');
+
+    await janitor._tick();
+    assert.ok(!fs.existsSync(dir1), '占用释放后应自动删除');
+    assert.strictEqual(janitor.pending(), 0, '删除成功移出队列');
+
+    // 重启场景：队列持久化到 cleanup.json，新实例继续清理
+    const dir2 = path.join(downloads, '残留本子 [456]');
+    fs.mkdirSync(dir2);
+    const janitor2 = mk((d) => fs.rmSync(d, { recursive: true, force: true }));
+    janitor2.enqueue(dir2, { gid: '456', folder: '残留本子 [456]' });
+    const janitor3 = mk((d) => fs.rmSync(d, { recursive: true, force: true }));
+    assert.strictEqual(janitor3.pending(), 1, '重启后队列从磁盘恢复');
+    await janitor3._tick();
+    assert.ok(!fs.existsSync(dir2), '重启后占用释放同样自动删除');
+
+    // 安全护栏：下载目录之外的路径不删
+    const outside = path.join(tmp, 'outside-dir');
+    fs.mkdirSync(outside);
+    const janitor4 = mk((d) => fs.rmSync(d, { recursive: true, force: true }));
+    janitor4.enqueue(outside, { gid: '999' });
+    await janitor4._tick();
+    assert.ok(fs.existsSync(outside), '下载目录外的文件夹绝不能删');
 });
 
 test('Web 界面与静态资源可访问（无需密钥）', async () => {

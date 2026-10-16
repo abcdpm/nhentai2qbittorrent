@@ -168,9 +168,10 @@ async function removeDirWithRetry(dir) {
  * 下载引擎：多 CDN 轮询 + 超时重传 + 完整性校验 + 间隔控制 + WebP 统一
  **************************************************************************/
 class Downloader {
-    constructor(config, logger) {
+    constructor(config, logger, janitor) {
         this.config = config;
         this.logger = logger;
+        this.janitor = janitor || null;
         this.converter = new WebpConverter(config, logger);
         this._gateNext = 0;
     }
@@ -455,8 +456,11 @@ class Downloader {
                             task.folderRemoved = true;
                             log(`已清理原图片文件夹: ${task.folder}`);
                         } else {
-                            task.zipError = '原文件夹被占用未能删除（SMB/.fuse_hidden 占用中，稍后自动释放）';
+                            task.zipError = '原文件夹被占用未能删除（SMB/.fuse_hidden 占用中，已加入自动清理队列）';
                             log(`⚠ ${task.zipError}`);
+                            if (this.janitor) {
+                                this.janitor.enqueue(dir, { gid: task.gid, folder: task.folder, zip: zipName });
+                            }
                         }
                     }
                     // 联动 LANraragi：压缩成功后自动上传（失败不影响任务本身）

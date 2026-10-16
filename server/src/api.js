@@ -117,7 +117,7 @@ function probeConnection(rawUrl, timeoutMs = 5000) {
  * 所有 /api/* 均需 X-API-Key 鉴权（避免公网骚扰）。
  */
 function createHandler(ctx) {
-    const { config, store, keys, queue, logger, downloader, state } = ctx;
+    const { config, store, keys, queue, logger, downloader, state, janitor } = ctx;
 
     /** 历史下载记录：云端清单 ∪ 服务端已完成任务，尽量补全标题 */
     function historyData() {
@@ -175,6 +175,7 @@ function createHandler(ctx) {
                     currentTaskId: queue.current,
                     sharpAvailable: downloader.converter._load(),
                     cookieSet: !!config.get('nhCookie'),
+                    pendingCleanups: janitor ? janitor.pending() : 0,
                     downloadDir: config.get('downloadDir'),
                     keyName: keyInfo.name
                 });
