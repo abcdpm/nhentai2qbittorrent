@@ -47,8 +47,14 @@
         setTimeout(() => { el.style.opacity = '0'; el.style.transition = 'opacity .3s'; setTimeout(() => el.remove(), 320); }, 3200);
     }
 
+    // API 基址：兼容根路径与子路径部署（如 https://paccu.cn/nhentai/）
+    const API_BASE = (() => {
+        const p = location.pathname.replace(/[^/]*$/, '');
+        return p.endsWith('/') ? p : p + '/';
+    })();
+
     async function api(path, options = {}) {
-        const res = await fetch(path, {
+        const res = await fetch(API_BASE + String(path).replace(/^\/+/, ''), {
             method: options.method || 'GET',
             headers: Object.assign({ 'X-API-Key': state.apiKey }, options.body ? { 'Content-Type': 'application/json' } : {}),
             body: options.body ? JSON.stringify(options.body) : undefined
@@ -372,7 +378,7 @@
 
     async function exportHistory() {
         try {
-            const res = await fetch('/api/history/export', { headers: { 'X-API-Key': state.apiKey } });
+            const res = await fetch(API_BASE + 'api/history/export', { headers: { 'X-API-Key': state.apiKey } });
             if (!res.ok) throw new Error('HTTP ' + res.status);
             const blob = await res.blob();
             const a = document.createElement('a');

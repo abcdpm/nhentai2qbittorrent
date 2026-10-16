@@ -4,7 +4,7 @@ const { sleep, uuid, nowIso, galleryFolderName } = require('./util');
 const ACTIVE_STATUSES = ['queued', 'downloading'];
 
 /** 校验外部传入的元数据（油猴脚本推送时附带，服务端即可零元数据请求、纯 CDN 下载） */
-function sanitizeMeta(raw) {
+function sanitizeMeta(raw, gid) {
     if (!raw || typeof raw !== 'object') return null;
     const mediaId = String(raw.mediaId == null ? '' : raw.mediaId).trim();
     const numPages = parseInt(raw.numPages, 10);
@@ -19,7 +19,7 @@ function sanitizeMeta(raw) {
     const host = String(raw.coverHost == null ? '' : raw.coverHost).trim().replace(/\/+$/, '');
     if (/^https?:\/\/[a-z0-9.\-]+(:\d+)?$/i.test(host)) coverHost = host;
 
-    return { mediaId, numPages, extMap, coverHost };
+    return { gid: String(gid || raw.gid || ''), mediaId, numPages, extMap, coverHost };
 }
 
 /**
@@ -93,7 +93,7 @@ class QueueManager {
                 revivable.createdAt = nowIso();
                 revivable.startedAt = null;
                 revivable.finishedAt = null;
-                const revMeta = sanitizeMeta(raw.meta);
+                const revMeta = sanitizeMeta(raw.meta, gid);
                 if (revMeta) revivable.meta = revMeta;
                 added.push(revivable);
                 if (this.logger) this.logger.info(`任务重新入队: ${gid} ${title}`);
@@ -113,7 +113,7 @@ class QueueManager {
                 error: null,
                 downloadedBytes: 0,
                 convertedToWebp: false,
-                meta: sanitizeMeta(raw.meta),
+                meta: sanitizeMeta(raw.meta, gid),
                 createdAt: nowIso(),
                 startedAt: null,
                 finishedAt: null

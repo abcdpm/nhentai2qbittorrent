@@ -4,3 +4,4 @@ server/data/
 server/downloads/
 node_modules/
 lanraragi-plugin/nHentaiCustom.pm
+nginx.yaml

@@ -16,9 +16,25 @@ const MAGIC = {
     webp: buf => buf.length > 15 && buf.slice(0, 4).toString('latin1') === 'RIFF' && buf.slice(8, 12).toString('latin1') === 'WEBP'
 };
 
+/** 识别图片真实格式（jpg/png/gif/webp/avif/bmp/tiff），无法识别返回 null */
+function detectImageFormat(buf) {
+    if (!buf || buf.length < 8) return null;
+    if (MAGIC.jpg(buf)) return 'jpg';
+    if (MAGIC.png(buf)) return 'png';
+    if (MAGIC.gif(buf)) return 'gif';
+    if (MAGIC.webp(buf)) return 'webp';
+    if (buf.length > 12 && buf.slice(4, 8).toString('latin1') === 'ftyp') return 'avif';   // AVIF/HEIF
+    if (buf[0] === 0x42 && buf[1] === 0x4D) return 'bmp';
+    const head4 = buf.slice(0, 4).toString('hex');
+    if (head4 === '49492a00' || head4 === '4d4d002a') return 'tiff';
+    return null;
+}
+
 function sniffMagic(buf, ext) {
+    const detected = detectImageFormat(buf);
+    if (detected) return detected === String(ext || '').toLowerCase();
     const fn = MAGIC[String(ext || '').toLowerCase()];
-    return fn ? !!fn(buf) : buf.length > 0;
+    return fn ? false : buf.length > 0;
 }
 
 function extOfFile(name) {
@@ -188,11 +204,12 @@ class Downloader {
      */
     async _downloadPage(ctx, n, ext) {
         const { dir, meta, signal } = ctx;
+        const gidTag = ctx.gid || meta.gid || '?';
         const hosts = ctx.hosts;
         const cfg = this.config;
-        const info = (m) => { if (this.logger) this.logger.info(`[gid:${meta.gid}] ${m}`); };
-        const warn = (m) => { if (this.logger) this.logger.warn(`[gid:${meta.gid}] ${m}`); };
-        const dbg = (m) => { if (this.logger) this.logger.debug(`[gid:${meta.gid}] ${m}`); };
+        const info = (m) => { if (this.logger) this.logger.info(`[gid:${gidTag}] ${m}`); };
+        const warn = (m) => { if (this.logger) this.logger.warn(`[gid:${gidTag}] ${m}`); };
+        const dbg = (m) => { if (this.logger) this.logger.debug(`[gid:${gidTag}] ${m}`); };
 
         const maxRounds = Math.max(1, cfg.get('maxAttempts'));
         const timeoutMs = cfg.get('timeoutMs');
@@ -249,22 +266,27 @@ class Downloader {
                             err.contentError = true;
                             throw err;
                         }
-                        if (!sniffMagic(buf, tryExt)) {
-                            const err = new Error(`文件头校验失败（不是有效 ${tryExt}）`);
+                        // 按实际格式校验并保存：nhentai 存在"URL 后缀/Content-Type 与真实格式不符"的图片
+                        // （如 18.png 实为 JPEG）——浏览器能下，这里也应按真实格式保存，而不是误判失败
+                        const detected = detectImageFormat(buf);
+                        if (!detected) {
+                            const head = buf.slice(0, 12).toString('hex').replace(/(..)/g, '$1 ').trim();
+                            const ctype = res.headers.get('content-type') || '?';
+                            const err = new Error(`内容不是图片 (content-type: ${ctype}, 文件头: ${head})`);
                             err.contentError = true;
                             throw err;
                         }
 
-                        const fileName = `${n}.${tryExt}`;
+                        const fileName = `${n}.${detected}`;
                         const filePath = path.join(dir, fileName);
                         const tmpPath = filePath + '.part';
                         fs.writeFileSync(tmpPath, buf);
                         fs.renameSync(tmpPath, filePath);
-                        if (ext && tryExt !== ext) {
-                            warn(`页${n} meta 后缀 .${ext} 与实际不符，已按 .${tryExt} 保存`);
+                        if (detected !== tryExt) {
+                            warn(`页${n} URL 后缀 .${tryExt} 与实际格式不符（实际为 ${detected.toUpperCase()}），已按 .${detected} 保存`);
                         }
                         dbg(`页${n} ✓ · ${url} · ${formatBytes(buf.length)} (第${attempt}次尝试, ${ms}ms)`);
-                        return { file: fileName, bytes: buf.length };
+                        return { file: fileName, bytes: buf.length, ext: detected };
                     } catch (e) {
                         if (signal && signal.aborted) throw new Error('已取消');
                         const ms = Date.now() - t0;
@@ -350,7 +372,7 @@ class Downloader {
         task.failed = 0;
 
         const hosts = this._hostList(meta);
-        const ctx = { dir, meta, signal, hosts };
+        const ctx = { dir, meta, signal, hosts, gid: task.gid };
         const totalRounds = 1 + Math.max(0, cfg.get('repairRounds'));
 
         for (let round = 1; round <= totalRounds; round++) {

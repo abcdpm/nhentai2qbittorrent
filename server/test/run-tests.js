@@ -120,6 +120,20 @@ function createMockSite(galleries) {
             if (action === '404') { res.writeHead(404); res.end('nope'); return; }
             if (action === '500') { res.writeHead(500); res.end('err'); return; }
             if (action === '429') { res.writeHead(429, { 'Retry-After': '1' }); res.end('rate'); return; }
+            if (action === 'jpeg') {
+                // 后缀错位场景：URL 是 .png 但实际内容是 JPEG（nhentai 真实存在的老文件）
+                const buf = magicBlob('jpg', Buffer.alloc(300, 7));
+                res.writeHead(200, { 'Content-Type': 'image/png', 'Content-Length': buf.length });
+                res.end(buf);
+                return;
+            }
+            if (action === 'html') {
+                // 非图片内容（拦截页/错误页）
+                const buf = Buffer.from('<html><body>Just a moment...</body></html>'.padEnd(300, ' '));
+                res.writeHead(200, { 'Content-Type': 'text/html', 'Content-Length': buf.length });
+                res.end(buf);
+                return;
+            }
             const ext = (file.match(/\.[a-z0-9]+$/i) || ['.bin'])[0].slice(1);
             const buf = magicBlob(ext, Buffer.alloc(300, 7));
             res.writeHead(200, { 'Content-Type': 'image/' + ext, 'Content-Length': buf.length });
@@ -198,7 +212,8 @@ const GALLERY_1 = {
     '123002': { mediaId: '900002', title: '[作者B] 旋转与重试', types: ['j', 'j'] },
     '123003': { mediaId: '900003', title: '[作者C] 完整性补齐', types: ['j', 'j', 'p'] },
     '123004': { mediaId: '900004', title: '[作者D] 限流处理', types: ['j', 'w'] },
-    '123005': { mediaId: '900005', title: '[作者E] WebP转换', types: ['j', 'g'] }
+    '123005': { mediaId: '900005', title: '[作者E] WebP转换', types: ['j', 'g'] },
+    '123009': { mediaId: '900009', title: '[作者G] 后缀错位', types: ['p'] }
 };
 
 test('元数据解析：media_id / num_pages / 后缀表 / 标题 / CDN 主机', () => {
@@ -1033,6 +1048,62 @@ test('压缩后自动上传 LANraragi（Bearer 认证 / 标题 / source 标签 /
     }
 });
 
+test('URL 后缀与实际格式不符（1.png 实为 JPEG）→ 按实际格式保存且一次成功', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    mock.plan('1.png', 'jpeg');   // 每次请求 1.png 都返回 JPEG 内容（nhentai 真实存在的错位文件）
+    const env = makeEnv(mock);
+    try {
+        const { added } = env.queue.enqueue([{
+            gid: '123009', title: '[作者G] 后缀错位',
+            meta: { mediaId: '900009', numPages: 1, extMap: ['png'], coverHost: null }
+        }]);
+        env.queue.start();
+        const task = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 15000, '任务完成');
+
+        assert.strictEqual(task.status, 'completed', '内容是有效图片即应成功');
+        assert.strictEqual(task.pages[0].file, '1.jpg', '应按实际格式 JPEG 保存为 1.jpg');
+        const dir = path.join(env.config.get('downloadDir'), '[作者G] 后缀错位 [123009]');
+        assert.deepStrictEqual(filesOf(dir), ['1.jpg']);
+
+        assert.strictEqual(mock.state.hits.filter(h => h.file === '1.png').length, 1, '一次请求即成功，不再空转');
+        assert.strictEqual(mock.state.hits.filter(h => h.file !== '1.png').length, 0, '无需尝试其它后缀/节点');
+    } finally {
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('非图片内容（拦截页）→ 报错含 content-type 与文件头十六进制', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    for (const f of ['1.png', '1.jpg', '1.webp', '1.gif']) mock.plan(f, 'html');   // 所有后缀都返回 HTML
+    const env = makeEnv(mock);
+    env.config.data.maxAttempts = 1;
+    env.config.data.repairRounds = 0;
+    try {
+        const { added } = env.queue.enqueue([{
+            gid: '123009', title: '[作者G] 后缀错位',
+            meta: { mediaId: '900009', numPages: 1, extMap: ['png'], coverHost: null }
+        }]);
+        env.queue.start();
+        const task = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 15000, '任务完成');
+
+        assert.strictEqual(task.status, 'failed');
+        const err = (task.pages[0] && task.pages[0].error) || task.error || '';
+        assert.ok(/内容不是图片/.test(err), '应明确说明返回的不是图片: ' + err);
+        assert.ok(/text\/html/.test(err), '报错应包含 content-type');
+        assert.ok(/文件头:/.test(err), '报错应包含文件头十六进制');
+    } finally {
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
 test('Web 界面与静态资源可访问（无需密钥）', async () => {
     const mock = await createMockSite(GALLERY_1);
     const env = makeEnv(mock);
@@ -1050,6 +1121,8 @@ test('Web 界面与静态资源可访问（无需密钥）', async () => {
         assert.strictEqual(idx.status, 200);
         const html = await idx.text();
         assert.ok(html.includes('nHentai 下载服务'));
+        assert.ok(html.includes('href="style.css"') && html.includes('src="app.js"') && html.includes('href="favicon.svg"'),
+            '静态资源应使用相对路径（支持 /nhentai 子路径反代）');
         const css = await fetch(base + '/style.css');
         assert.strictEqual(css.status, 200);
         const js = await fetch(base + '/app.js');

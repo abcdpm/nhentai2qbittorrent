@@ -44,6 +44,31 @@ docker compose up -d                          # 本机刚推送过则直接运�
 - **Web 控制台**：`http://部署机IP:8787`（宿主机端口可改：`NH_HOST_PORT=8080 docker compose up -d`）
 - **环境变量**：所有配置项都可用 `NH_` 前缀环境变量固定（如 `NH_REQUEST_INTERVAL_MS`、`NH_CONVERT_TO_WEBP`、`NH_CDN_BASE_URLS` 逗号分隔），**优先级高于 Web 界面保存值**；compose 默认仅固定 `NH_HOST`/`NH_PORT`（监听相关，界面中不可改）
 
+### 反向代理子路径部署（如 https://paccu.cn/nhentai）
+
+前端已支持子路径部署（静态资源相对路径 + 自适应 API 基址），nginx 只需按前缀转发并**去掉前缀**：
+
+```nginx
+# 无尾斜杠 → 补斜杠
+location = /nhentai {
+    return 301 /nhentai/;
+}
+# 注意 proxy_pass 末尾的 "/"：会把 /nhentai 前缀去掉再转发给服务
+location /nhentai/ {
+    proxy_pass http://192.168.0.145:8787/;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_connect_timeout 60s;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+}
+```
+
+- 油猴脚本「服务地址」填 `https://paccu.cn/nhentai`（拼接为 `/nhentai/api/...`）
+- 公网暴露时所有 API 仍需 API Key，安全机制不变
+
 
 **首次启动**会自动生成一枚 API Key，打印在日志里，并写入 `server/data/INITIAL_API_KEY.txt`（复制后建议删除该文件）。
 浏览器打开 `http://127.0.0.1:8787`，输入 API Key 进入控制台。**所有 `/api/*` 均需密钥**（请求头 `X-API-Key`），公网暴露也不会被陌生人刷任务；密钥可随时在控制台生成 / 吊销（磁盘只存 SHA-256 哈希）。
@@ -105,6 +130,7 @@ GET/PUT /api/settings                 GET/POST /api/keys     DELETE /api/keys/:i
 - 推送时元数据（media_id / 页数）随任务上传并显示「元数据 n/n 随任务上传」（失败自动重试 1 次）
 - **下载详细日志**：每次请求记录 页码/尝试序号/完整 URL/耗时/结果（404/429/超时/HTTP状态/文件头校验），轮次退避、CDN 轮换、任务结束输出「失败页明细（含每页最后错误）」——下载异常一眼定位原因
 - **下载可靠性增强**：404 时同节点自动尝试其它后缀兜底（HTML 源后缀表偏差自愈）；网络/超时错误保持换节点重传语义
+- **修复：后缀错位文件下载失败**（nhentai 存在 `.png` 实为 JPEG 等"扩展名/Content-Type 与真实格式不符"的文件）——现按**文件头识别真实格式**并以真实后缀保存（`18.png` 实为 JPEG → 存 `18.jpg`，一次成功）；识别范围 jpg/png/gif/webp/avif/bmp/tiff；真正非图片（拦截页）才报错，且报错带 content-type 与文件头十六进制；顺带修复日志 `[gid:undefined]`
 - **LANraragi 联动**：压缩成功后自动上传（`PUT /api/archives/upload`，`Authorization: Bearer <base64(api_key)>`）并附带**标题 + `source:nhentai.net/g/{gid}` 标签 + SHA1 校验**（与 LRR 插件三级回退闭环）；设置页可配地址/API Key/分类 ID 并「🔌 测试连接」；上传失败仅告警不影响任务
 - 下载队列**分页**（每页 20 条 + 页码控件）；右上新增「🗑️ 清空已下载」（仅清任务记录，磁盘 zip/文件保留）
 - 顶部统计数字改为**显示在各过滤按钮右侧**（全部/排队中/下载中/已完成/部分失败/失败/已取消）
