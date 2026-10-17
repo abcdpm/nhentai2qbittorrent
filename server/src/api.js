@@ -205,6 +205,7 @@ function createHandler(ctx) {
                 sendJson(res, 200, {
                     ok: true,
                     added: result.added.map(t => ({ id: t.id, gid: t.gid, title: t.title, folder: t.folder, status: t.status })),
+                    updated: (result.updated || []).map(t => ({ id: t.id, gid: t.gid, title: t.title, folder: t.folder, status: t.status })),
                     skipped: result.skipped,
                     counts: store.counts()
                 });
@@ -355,10 +356,16 @@ function createHandler(ctx) {
                 const active = new Set();      // 排队中/下载中的任务
                 const terminal = new Set();    // 失败/取消/部分失败的终态任务（黄标应消失）
                 const failed = [];
+                const needMeta = [];           // 缺元数据的任务 gid（浏览器在详情页时自动补挂）
                 const recentDone = [];
                 const now = Date.now();
                 for (const t of store.list()) {
                     const gid = String(t.gid);
+                    if (!(t.meta && t.meta.mediaId) && t.status !== 'completed') {
+                        if (t.status === 'queued' || t.status === 'downloading' || t.status === 'failed' || t.status === 'completed_with_errors') {
+                            needMeta.push(gid);
+                        }
+                    }
                     if (t.status === 'completed') {
                         set.add(gid);
                         const ft = t.finishedAt ? new Date(t.finishedAt).getTime() : 0;
@@ -390,6 +397,7 @@ function createHandler(ctx) {
                     downloadedGids: [...set],
                     downloadingGids: [...downloading],
                     failed,
+                    needMeta,
                     recentDone
                 });
                 return;

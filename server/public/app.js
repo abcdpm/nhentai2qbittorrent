@@ -38,6 +38,13 @@
         return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
     }
 
+    /** ISO 时间 → 浏览器本地时间（"2026/10/17 19:49:19" 格式，统一按本地时区显示，不再显示 UTC） */
+    function fmtLocalTime(iso) {
+        if (!iso) return '';
+        const d = new Date(iso);
+        return isNaN(d.getTime()) ? String(iso) : d.toLocaleString('zh-CN', { hour12: false });
+    }
+
     /* ---------- 页面内确认弹窗（替代浏览器原生 confirm）---------- */
     function showConfirm({ title = '确认操作', message = '', okText = '确定', danger = true, icon = '🗑️' } = {}) {
         return new Promise((resolve) => {
@@ -202,7 +209,7 @@
                             ${t.downloadedBytes ? `<span>已下载 ${formatBytes(t.downloadedBytes)}</span>` : ''}
                             ${t.convertedToWebp ? '<span>WebP ✓</span>' : ''}
                             ${t.zipFile ? `<span>📦 ZIP ✓${t.zipBytes ? ' ' + formatBytes(t.zipBytes) : ''}</span>` : ''}
-                            ${t.startedAt ? `<span>开始 ${esc(String(t.startedAt).replace('T', ' ').slice(0, 19))}</span>` : ''}
+                            ${t.startedAt ? `<span>开始 ${esc(fmtLocalTime(t.startedAt))}</span>` : ''}
                         </div>
                     </div>
                     <div class="task-actions">
@@ -275,7 +282,7 @@
     /* ---------- 设置 ---------- */
     const SETTINGS_FIELDS = ['downloadDir', 'requestIntervalMs', 'galleryIntervalMs', 'pageConcurrency',
         'timeoutMs', 'maxAttempts', 'retryDelayMs', 'repairRounds', 'webpQuality',
-        'metaUrlTemplate', 'nhCookie', 'userAgent', 'lrrUrl', 'lrrApiKey', 'lrrCategory'];
+        'metaUrlTemplate', 'apiUrlTemplate', 'nhCookie', 'userAgent', 'lrrUrl', 'lrrApiKey', 'lrrCategory'];
 
     async function loadSettings() {
         try {
@@ -331,8 +338,8 @@
                 <tr>
                     <td>${esc(k.name)}</td>
                     <td><code>${esc(k.prefix)}…</code></td>
-                    <td>${esc(String(k.createdAt).replace('T', ' ').slice(0, 19))}</td>
-                    <td>${k.lastUsedAt ? esc(String(k.lastUsedAt).replace('T', ' ').slice(0, 19)) : '从未使用'}</td>
+                    <td>${esc(fmtLocalTime(k.createdAt))}</td>
+                    <td>${k.lastUsedAt ? esc(fmtLocalTime(k.lastUsedAt)) : '从未使用'}</td>
                     <td style="text-align:right"><button class="btn small danger" data-key-revoke="${k.id}">吊销</button></td>
                 </tr>`).join('') || '<tr><td colspan="5" class="muted">暂无密钥</td></tr>';
         } catch (e) {
@@ -363,7 +370,7 @@
                 for (const l of d.logs) {
                     const line = document.createElement('div');
                     line.className = 'log-line';
-                    line.innerHTML = `<span class="log-ts">${esc(l.ts.slice(11, 19))}</span>` +
+                    line.innerHTML = `<span class="log-ts">${esc((fmtLocalTime(l.ts).split(' ').pop()) || l.ts.slice(11, 19))}</span>` +
                         `<span class="log-level ${esc(l.level)}">${esc(l.level.toUpperCase())}</span>` +
                         `<span class="log-msg">${esc(l.msg)}</span>`;
                     box.appendChild(line);
@@ -412,7 +419,7 @@
             const blob = await res.blob();
             const a = document.createElement('a');
             a.href = URL.createObjectURL(blob);
-            a.download = `nh_downloaded_history_${new Date().toISOString().slice(0, 10).replace(/-/g, '')}.json`;
+            a.download = `nh_downloaded_history_${fmtLocalTime(new Date()).slice(0, 10).replace(/[\/\s]/g, '')}.json`;
             a.click();
             URL.revokeObjectURL(a.href);
             toast('历史记录已备份到本地（与前端备份同格式）', 'ok');

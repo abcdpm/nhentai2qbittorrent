@@ -1107,6 +1107,57 @@ test('标题兜底与自愈：meta.title 替代 gid 占位标题；下载启动�
     }
 });
 
+test('元数据自愈通道：缺 meta 任务补挂 / needMeta 通告 / 旧版 apiUrlTemplate 遗留自动清理', async () => {
+    // ① 旧版本遗留的官方 API 模板自动清空（否则缺 meta 的任务会去请求官方 API，与"默认禁用"不符）
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'nh-test-cfg-'));
+    fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify({ apiUrlTemplate: 'https://nhentai.net/api/gallery/{gid}' }), 'utf8');
+    const cfg = new Config(tmp);
+    assert.strictEqual(cfg.get('apiUrlTemplate'), '', '旧版本遗留的官方 API 模板应自动清空');
+    fs.writeFileSync(path.join(tmp, 'config.json'), JSON.stringify({ apiUrlTemplate: 'https://example.com/api/{gid}' }), 'utf8');
+    const cfg2 = new Config(tmp);
+    assert.strictEqual(cfg2.get('apiUrlTemplate'), 'https://example.com/api/{gid}', '用户显式配置的其它模板不受迁移影响');
+
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    const keys = new KeyStore(env.tmp, env.logger);
+    const created = keys.create('测试密钥');
+    const state = new StateStore(env.tmp);
+    const handler = createHandler({
+        config: env.config, store: env.store, keys, queue: env.queue,
+        logger: env.logger, downloader: env.downloader, state
+    });
+    const server = http.createServer((req, res) => handler(req, res).catch(() => { res.writeHead(500); res.end(); }));
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+        // ② 队列中缺 meta 的任务允许补挂（updated）+ gid 占位标题/文件夹名自愈
+        const { added } = env.queue.enqueue([{ gid: '123001', title: '123001' }]);   // 无 meta、标题是 gid 占位
+        const r2 = env.queue.enqueue([{
+            gid: '123001', title: '123001',
+            meta: { title: '[作者A] 测试本子标题', mediaId: '900001', numPages: 3, extMap: ['jpg', 'png', 'webp'], coverHost: null }
+        }]);
+        assert.strictEqual(r2.updated.length, 1, '排队中缺 meta 的任务应补挂而不是跳过');
+        assert.strictEqual(r2.skipped.length, 0);
+        const task = env.store.get(added[0].id);
+        assert.ok(task.meta && task.meta.mediaId === '900001', 'meta 应补挂成功');
+        assert.strictEqual(task.title, '[作者A] 测试本子标题', 'gid 占位标题应随 meta 自愈');
+        assert.strictEqual(task.folder, '[作者A] 测试本子标题 [123001]');
+
+        // ③ /api/sync 通告 needMeta：缺 meta 的活动/失败任务（浏览器在详情页时自动补挂）
+        env.store.add({ id: 'f1', gid: '222', status: 'failed', title: 'T2', folder: 'f', pages: [], createdAt: '2026-01-01T00:00:00Z', error: 'x' });
+        env.store.add({ id: 'c1', gid: '333', status: 'completed', title: 'T3', folder: 'f', pages: [], meta: { mediaId: '1' }, createdAt: '2026-01-01T00:00:00Z' });
+        const res = await fetch(base + '/api/sync', { headers: { 'X-API-Key': created.raw } });
+        const d = await res.json();
+        assert.ok(d.needMeta.includes('222'), '缺 meta 的失败任务应通告 needMeta（浏览器可补挂后自动重新入队）');
+        assert.ok(!d.needMeta.includes('123001'), '已补挂 meta 的任务不应再通告');
+        assert.ok(!d.needMeta.includes('333'), '已完成任务不通告 needMeta');
+    } finally {
+        server.close();
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
 test('压缩后自动上传 LANraragi（Bearer 认证 / 标题 / source 标签 / SHA1）', async () => {
     const mock = await createMockSite(GALLERY_1);
     const env = makeEnv(mock);

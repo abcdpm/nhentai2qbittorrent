@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nHentai → Local Image Scraper
 // @namespace    http://tampermonkey.net/
-// @version      5.8.0
+// @version      5.9.0
 // @description  直接提取高清原图下载；「推送到下载服务」自动附带元数据（media_id/Pages数），服务端纯CDN下载避开官方API限流；完整性校验/超时重传/多CDN轮询/WebP统一/自动压缩zip；下载完成自动标记已下载；文件夹格式：本子名 [本子id]
 // @author       Paccu
 // @match        https://nhentai.net/g/*
@@ -86,6 +86,9 @@
     let downloadingSet = new Set();
     /** 同步对账判定「已非下载中」的 gid（写入 localStorage 时剔除，防止旧快照复活黄标） */
     let pendingRemove = new Set();
+    /** 服务端缺元数据的任务 gid（来自 /api/sync 的 needMeta，详情页自动补挂） */
+    let needMetaSet = new Set();
+    const metaHealTried = new Set();
     let globalFailedItems = [];
 
     function readLocalGidSet(key) {
@@ -248,11 +251,12 @@
         });
     }
 
-    /** 抓取单本元数据用于随任务上传（失败重试 1 次；仍失败返回 null，服务端会回退自行抓取） */
+    /** 抓取单本元数据用于随任务上传（重试 3 次且每次重试重新抓页面；仍失败返回 null，服务端会回退自行抓取） */
     async function fetchMetaForPush(gid, htmlString = null) {
-        for (let attempt = 1; attempt <= 2; attempt++) {
+        for (let attempt = 1; attempt <= 3; attempt++) {
             try {
-                const m = await fetchGalleryMeta(gid, htmlString);
+                // 首次用调用方给的 HTML（详情页现成）；重试时重新抓页面（不复用失败的 HTML）
+                const m = await fetchGalleryMeta(gid, attempt === 1 ? htmlString : null);
                 return {
                     title: m.title || null,
                     mediaId: m.mediaId,
@@ -261,7 +265,7 @@
                     coverHost: m.imgHost ? 'https://' + m.imgHost : null
                 };
             } catch (e) {
-                if (attempt < 2) await new Promise(r => setTimeout(r, 800));
+                if (attempt < 3) await new Promise(r => setTimeout(r, 1200 * attempt));
             }
         }
         return null;
@@ -301,9 +305,9 @@
             return null;
         }
         // 记录本浏览器推送过的任务 + 立即打「下载中」黄色角标
-        if (res.json && Array.isArray(res.json.added)) {
+        if (res.json && (Array.isArray(res.json.added) || Array.isArray(res.json.updated))) {
             const pushed = readPushedMap();
-            for (const it of res.json.added) {
+            for (const it of [...(res.json.added || []), ...(res.json.updated || [])]) {
                 pushed[String(it.gid)] = Date.now();
                 downloadingSet.add(String(it.gid));
             }
@@ -312,12 +316,45 @@
             requestRender();
         }
         if (res.json) {
-            res.json.metaInfo = `元数据 ${metaOk}/${items.length} 随任务上传（服务端零 API 请求）`;
+            const missing = items.filter(it => !it.meta).map(it => String(it.gid));
+            res.json.metaMissing = missing;
+            res.json.metaInfo = missing.length
+                ? `<span style="color:#ff9800;">⚠ 元数据 ${metaOk}/${items.length} 随任务上传；${missing.length} 本解析失败（GID ${escapeHtml(missing.join('、'))}）——服务端将尝试自行抓取，可能被 Cloudflare 拦截。请稍后打开对应详情页，脚本会自动补上元数据</span>`
+                : `<span style="color:#8bc34a;">元数据 ${metaOk}/${items.length} 随任务上传（服务端零元数据请求）</span>`;
         }
         // 推送后快速同步两轮（下载通常几秒完成，及时标记「已下载」）
         setTimeout(syncDownloadedFromServer, 4000);
         setTimeout(syncDownloadedFromServer, 10000);
         return res.json;
+    }
+
+    /**
+     * 元数据自愈：服务端任务缺 meta 时（推送时解析失败/手动入队），只要浏览器能打开对应详情页，
+     * meta 就在当前页面里——解析后补挂给服务端；失败的任务会随补挂自动重新入队继续下载。
+     */
+    async function maybeHealMetaOnDetailPage() {
+        if (!SERVER_KEY || !location.pathname.startsWith('/g/')) return;
+        const gid = String(location.pathname.split('/')[2] || '');
+        if (!/^\d+$/.test(gid) || !needMetaSet.has(gid) || metaHealTried.has(gid)) return;
+        metaHealTried.add(gid);
+
+        const title = extractPageTitle() || gid;
+        const meta = await fetchMetaForPush(gid, document.documentElement.innerHTML);
+        if (!meta) {
+            notify(`<div class='title'>⚠ 元数据补挂失败</div><div style="font-size:12px;color:#ccc;">无法从当前页面解析本子 ${gid} 的元数据，任务暂时无法下载</div>`, 8000);
+            return;
+        }
+        const result = await pushItemsToServer([{ gid, title, meta }]);
+        if (!result) return;
+        const revived = (result.added || []).length > 0;
+        const attached = (result.updated || []).length > 0;
+        if (revived || attached) {
+            notify(`
+                <div class='title' style="color:#4caf50;">🩹 已自动补上元数据</div>
+                <div style="font-size:12px;color:#ccc;word-break:break-all;">${escapeHtml(title)}</div>
+                <div style="font-size:12px;color:#8bc34a;margin-top:4px;">${revived ? '任务已重新入队，继续下载' : '任务继续下载'}（无需请求官方 API）</div>
+            `, 8000);
+        }
     }
 
     /**
@@ -333,7 +370,9 @@
      * 本地下载与下载服务完成 都会调用 recordDownloadedGid 更新。
      */
     const HISTORY_KEY = 'nh_qb_push_history_v2';
-    const getBjTime = () => new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+    /** 统一时间显示：浏览器本地时间（本地时区，"2026/10/17 19:49:19" 格式；不再固定北京时区） */
+    const fmtLocalTime = (d) => new Date(d == null ? Date.now() : d).toLocaleString('zh-CN', { hour12: false });
+    const getBjTime = () => fmtLocalTime();   // 兼容旧引用
 
     function renderGidInfo(data) {
         const linkStyle = 'color:#ed2553;font-weight:bold;font-size:14px;margin:0 4px;text-decoration:none;border-bottom:1px dashed #ed2553;';
@@ -343,20 +382,28 @@
                `<div style="${rowStyle}"><span style="color:#aaa;">上次下载最大 GID:</span><a href="/g/${data.prev.id}/" target="_blank" style="${linkStyle}">${data.prev.id}</a><span style="${timeStyle}">[${data.prev.time}]</span></div>`;
     }
 
-    function recordDownloadedGid(gid, timeStr) {
+    /**
+     * 记录「已下载最大 GID」水位线（右下角面板）。
+     * 时间戳语义（统一）：发送到 web 服务 API 时的浏览器本地时间——记录本条时本地状态（nh_qb_*）
+     * 正上传到下载服务，使用浏览器本地时钟；不再混用服务端 finishedAt（服务端时钟），
+     * 「上次下载时间 ≤ 已下载最大时间」按记录顺序天然成立。
+     */
+    function recordDownloadedGid(gid) {
         const id = parseInt(gid, 10);
         if (!Number.isFinite(id) || id <= 0) return;
         let hist;
         try { hist = JSON.parse(localStorage.getItem(HISTORY_KEY) || ''); } catch (e) { hist = null; }
-        if (!hist || !hist.max) hist = { max: { id: 0, time: '--' }, prev: { id: 0, time: '--' } };
-        if (id > (parseInt(hist.max.id, 10) || 0)) {
-            hist.prev = { id: hist.max.id || 0, time: hist.max.time || '--' };
-            hist.max = { id, time: timeStr || getBjTime() };
-            localStorage.setItem(HISTORY_KEY, JSON.stringify(hist));
-            localStorage.setItem('nh_qb_pushed_max_gid', String(id));   // 兼容旧键
-            const el = document.getElementById('nh-max-gid-display');
-            if (el) el.innerHTML = renderGidInfo(hist);
-        }
+        if (!hist || !hist.max) hist = { max: { id: 0, time: '--', ts: 0 }, prev: { id: 0, time: '--', ts: 0 } };
+        const curMax = parseInt(hist.max.id, 10) || 0;
+        if (id <= curMax) return;
+
+        const ts = Date.now();
+        hist.prev = { id: hist.max.id || 0, time: hist.max.time || '--', ts: Number(hist.max.ts) || 0 };
+        hist.max = { id, time: fmtLocalTime(ts), ts };
+        localStorage.setItem(HISTORY_KEY, JSON.stringify(hist));
+        localStorage.setItem('nh_qb_pushed_max_gid', String(id));   // 兼容旧键
+        const el = document.getElementById('nh-max-gid-display');
+        if (el) el.innerHTML = renderGidInfo(hist);
     }
 
     /**
@@ -376,7 +423,7 @@
         const justDone = [];
 
         // ① 已下载清单（服务端全部完成任务 ∪ 云端清单）
-        let newMaxGid = 0, newMaxTime = '';
+        const newDone = [];   // 本批新完成的 gid——稍后按升序逐本滚动水位线
         for (const gid of (d.downloadedGids || []).map(String)) {
             if (downloadingSet.has(gid)) { downloadingSet.delete(gid); changed = true; }
             if (downloadedSet.has(gid)) continue;
@@ -398,16 +445,12 @@
             if (recent && (isMine || isRecent)) justDone.push(recent);
             if (pushedMap[gid]) delete pushedMap[gid];
 
-            // 更新「已下载最大 GID」显示（取本批最大值，时间用服务端完成时间）
+            // 收集本批水位线记录（时间统一为记录/上传到 web 服务 API 时的本地时间）
             const num = parseInt(gid, 10);
-            if (Number.isFinite(num) && num > newMaxGid) {
-                newMaxGid = num;
-                newMaxTime = finishedAt
-                    ? new Date(finishedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
-                    : '';
-            }
+            if (Number.isFinite(num)) newDone.push(num);
         }
-        if (newMaxGid) recordDownloadedGid(newMaxGid, newMaxTime);
+        newDone.sort((a, b) => a - b);
+        for (const num of newDone) recordDownloadedGid(num);
 
         // ② 「下载中」黄色角标（服务端权威快照：云端标记 ∪ 活动任务）
         const active = new Set((d.downloadingGids || []).map(String));
@@ -441,6 +484,10 @@
                 <div style="font-size:12px;color:#ccc;word-break:break-all;">${names}</div>${more}
             `, 10000);
         }
+
+        // ③ 缺元数据的任务：若浏览器正开着对应详情页，自动解析当前页面补挂（失败任务随补挂自动重新入队）
+        needMetaSet = new Set((d.needMeta || []).map(String));
+        maybeHealMetaOnDetailPage();
     }
 
     /** 本浏览器推送过、尚未标记完成的任务清单 {gid: 推送时间戳} */
@@ -755,6 +802,7 @@
             notify(`
                 <div class='title' style="color:#4caf50;">📤 ${added ? '已推送本子到下载服务' : '任务未入队'}</div>
                 <div style="font-size:12px;color:#ccc;word-break:break-all;">${escapeHtml(title)}</div>
+                ${result.metaInfo ? `<div style="font-size:11px;margin-top:4px;">${result.metaInfo}</div>` : ''}
                 ${skipped.length ? `<div style="font-size:12px;color:#ff9800;margin-top:6px;">${escapeHtml(skipped[0].reason)}</div>` : `<div style="font-size:12px;color:#ccc;margin-top:6px;">服务端将自动排队下载，可在 Web 控制台查看进度</div>`}
             `, Infinity);
         });
@@ -782,6 +830,7 @@
             if (result.ok) {
                 notify(`<div class='title' style="font-size:15px; color:#4caf50;">✓ 本子下载完成</div>成功下载 ${result.success} 张，失败 <span style="color:${result.failed > 0 ? '#ff8b8b' : '#fff'}">${result.failed}</span> 张`, Infinity);
                 downloadedSet.add(gid); 
+                recordDownloadedGid(gid);   // 本地下载完成 → 记录水位线（时间=发送到 web 服务 API 时的本地时间）
                 persistLocalState();
                 syncLocalState();
                 requestRender();
@@ -876,8 +925,12 @@
 
     function handleBatchResult(successList, failedList, total) {
         if (successList.length > 0) {
-            // 本地下载完成 → 更新「已下载最大 GID」显示
-            recordDownloadedGid(Math.max(...successList.map(r => parseInt(r.gid, 10) || 0)));
+            // 本地批量下载完成 → 逐本滚动「已下载最大 GID」水位线（升序保留中间水位线）
+            const nums = successList
+                .map(r => parseInt(r.gid, 10))
+                .filter(n => Number.isFinite(n) && n > 0)
+                .sort((a, b) => a - b);
+            for (const n of nums) recordDownloadedGid(n);
         }
 
         globalFailedItems = failedList;
@@ -1037,7 +1090,7 @@
                 notify(`
                     <div class='title' style="color:#4caf50;">📤 已推送 ${(result.added || []).length} 本到下载服务</div>
                     <div style="font-size:12px;color:#ccc;">服务端将自动排队下载（完整性校验 + 超时重传 + 多CDN轮询）</div>
-                    ${result.metaInfo ? `<div style="font-size:11px;color:#8bc34a;margin-top:4px;">${result.metaInfo}</div>` : ''}
+                    ${result.metaInfo ? `<div style="font-size:11px;margin-top:4px;">${result.metaInfo}</div>` : ''}
                     ${skipped.length ? `<div style="font-size:12px;color:#ff9800;margin-top:6px;">跳过 ${skipped.length} 本：</div>${skippedHtml}` : ''}
                 `, Infinity);
             });
@@ -1217,7 +1270,7 @@
 
         modal.querySelector('#nhq_backup').addEventListener('click', () => {
             const data = localStorage.getItem(DOWNLOADED_KEY) || '[]'; const blob = new Blob([data], { type: 'application/json' }); const url = URL.createObjectURL(blob);
-            const a = document.createElement('a'); const dateStr = new Date().toISOString().slice(0,10).replace(/-/g, "");
+            const a = document.createElement('a'); const dateStr = fmtLocalTime().slice(0, 10).replace(/[\/\s]/g, '');
             a.download = `nh_downloaded_history_${dateStr}.json`; a.href = url; a.click(); URL.revokeObjectURL(url);
             notify(`<div class='title'>备份已下载</div>已保存到本地磁盘`, 5000);
         });
@@ -1304,7 +1357,6 @@
         }
         
         const HISTORY_KEY = 'nh_qb_push_history_v2';
-        const getBjTime = () => new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
         let pushHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || '{"max":{"id":0,"time":"--"},"prev":{"id":0,"time":"--"}}');
         if (!document.getElementById('nh-max-gid-display')) {
             const renderGidInfo = (data) => {

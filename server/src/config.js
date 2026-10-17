@@ -76,6 +76,17 @@ class Config {
     constructor(dataDir) {
         this.file = path.join(dataDir, 'config.json');
         this.data = Object.assign({}, DEFAULTS, readJson(this.file, {}), envOverrides());
+        // 数据迁移：旧版本（< v5.5.0）曾把官方 API 模板当作默认值持久化进 config.json，
+        // 新版本默认禁用官方 API（限流严重），但持久化值会盖过新默认值、且设置界面无法看见/清除。
+        // 对“等于旧默认值”的遗留配置做静默清理（用户显式配置的其它 API 模板不受影响）。
+        const LEGACY_API_TEMPLATES = [
+            'https://nhentai.net/api/gallery/{gid}',
+            'https://nhentai.net/api/galleries/{gid}'
+        ];
+        if (LEGACY_API_TEMPLATES.includes(String(this.data.apiUrlTemplate || '').trim())) {
+            this.data.apiUrlTemplate = '';
+            this.save();
+        }
     }
 
     all() {

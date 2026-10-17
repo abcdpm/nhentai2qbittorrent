@@ -71,28 +71,46 @@ class QueueManager {
     }
 
     /**
-     * 入队。items: [{gid, title?}]
-     * 返回 { added: [task], skipped: [{gid, reason}] }
+     * 入队。items: [{gid, title?, meta?}]
+     * 返回 { added: [task], skipped: [{gid, reason}], updated: [task] }
+     * updated：队列中已存在但缺元数据、本次推送补挂 meta 的任务（浏览器能打开页面就拿得到 meta）
      */
     enqueue(items) {
         const added = [];
         const skipped = [];
+        const updated = [];
         for (const raw of items || []) {
             const gid = String(raw && raw.gid != null ? raw.gid : '').trim();
             if (!/^\d+$/.test(gid)) { skipped.push({ gid, reason: 'gid 无效' }); continue; }
-
-            const all = this.store.findByGid(gid);
-            const existing = all.find(t => ACTIVE_STATUSES.includes(t.status) || t.status === 'completed' || t.status === 'completed_with_errors');
-            if (existing) {
-                skipped.push({ gid, reason: existing.status.startsWith('completed') ? '已下载完成' : `队列中已存在 (${existing.status})` });
-                continue;
-            }
 
             // 标题优先级：推送标题 > 元数据标题 > gid 兜底。
             // 与 gid 相同的占位标题视为无效（DOM 提取失败时前端会回退成 gid），改用元数据标题。
             const t1 = sanitizeTitle(raw.title);
             const t2 = sanitizeTitle(raw.meta && raw.meta.title);
             const title = (t1 && t1 !== gid ? t1 : (t2 && t2 !== gid ? t2 : gid));
+            const incMeta = sanitizeMeta(raw.meta, gid);
+
+            const all = this.store.findByGid(gid);
+            const existing = all.find(t => ACTIVE_STATUSES.includes(t.status) || t.status === 'completed' || t.status === 'completed_with_errors');
+            if (existing) {
+                // 队列中已存在但缺元数据（推送时解析失败/手动入队）→ 本次带了合法 meta 就补挂，
+                // 顺带自愈标题/文件夹名；否则照旧跳过。
+                if (!existing.meta && incMeta && ACTIVE_STATUSES.includes(existing.status)) {
+                    existing.meta = incMeta;
+                    if (title !== gid && (!existing.title || existing.title === gid)) {
+                        existing.title = title;
+                        const hasDone = (existing.pages || []).some(p => p.status === 'done');
+                        if (!hasDone) existing.folder = galleryFolderName(title, gid);
+                    }
+                    this.store.persist();
+                    updated.push(existing);
+                    if (this.logger) this.logger.info(`任务补充元数据: ${gid} ${existing.title}`);
+                    continue;
+                }
+                skipped.push({ gid, reason: existing.status.startsWith('completed') ? '已下载完成' : `队列中已存在 (${existing.status})` });
+                continue;
+            }
+
             // 失败/取消的任务直接复活重新入队
             const revivable = all.find(t => t.status === 'failed' || t.status === 'cancelled');
             if (revivable) {
@@ -103,8 +121,7 @@ class QueueManager {
                 revivable.createdAt = nowIso();
                 revivable.startedAt = null;
                 revivable.finishedAt = null;
-                const revMeta = sanitizeMeta(raw.meta, gid);
-                if (revMeta) revivable.meta = revMeta;
+                if (incMeta) revivable.meta = incMeta;
                 added.push(revivable);
                 if (this.logger) this.logger.info(`任务重新入队: ${gid} ${title}`);
                 continue;
@@ -123,7 +140,7 @@ class QueueManager {
                 error: null,
                 downloadedBytes: 0,
                 convertedToWebp: false,
-                meta: sanitizeMeta(raw.meta, gid),
+                meta: incMeta,
                 createdAt: nowIso(),
                 startedAt: null,
                 finishedAt: null
@@ -132,7 +149,7 @@ class QueueManager {
             added.push(task);
             if (this.logger) this.logger.info(`任务入队: ${gid} ${title}`);
         }
-        return { added, skipped };
+        return { added, skipped, updated };
     }
 
     cancel(id) {
