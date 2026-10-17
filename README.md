@@ -29,15 +29,17 @@ npm test                # 运行自动化测试（mock 源站全链路验证）
 cd server
 
 # 1) 构建镜像并推送到 Docker Hub（每次推送 <版本号> + latest 两个标签；首次会提示 docker login）
-./build-and-push.sh                     # 默认用户 llllalex，版本号取自 .env 的 IMAGE_TAG
+./build-and-push.sh                     # Linux/macOS：默认用户 llllalex，版本号取自 .env 的 IMAGE_TAG
 ./build-and-push.sh 1.1.0 我的用户名    # 也可指定 [版本号] [用户名]，并同步写回 .env
+.\build-and-push.bat                    # Windows（批处理，可双击快速执行；参数相同）
+.\build-and-push.bat 1.1.0 我的用户名   # 同样支持 [版本号] [用户名]，并同步写回 .env
 
 # 2) 部署（compose 不参与镜像构建，仅拉取镜像运行）
 docker compose pull && docker compose up -d   # 从 Docker Hub 拉取部署
 docker compose up -d                          # 本机刚推送过则直接运行本地镜像
 ```
 
-- **镜像版本**：`.env` 中 `DOCKERHUB_USER=llllalex`、`IMAGE_TAG=1.0.0`，推送脚本与 compose 共用；每次推送固定上传 `:1.0.0`（当前版本号）与 `:latest` 两个标签
+- **镜像版本**：`.env` 中 `DOCKERHUB_USER=llllalex`、`IMAGE_TAG=1.0.0`，推送脚本（`build-and-push.sh` / `build-and-push.bat`）与 compose 共用；每次推送固定上传 `:1.0.0`（当前版本号）与 `:latest` 两个标签
 - **持久化**：`./data`（配置 / API 密钥 / 任务队列）、`./downloads`（本子，格式 `本子名 [本子id]`）
 - **文件归属**：支持 `PUID`/`PGID`（linuxserver.io 风格），默认 `PUID=1000 PGID=100`，下载文件自动归属该用户：`PUID=$(id -u) PGID=$(id -g) docker compose up -d`（或写入 `.env`）
 - **首次 API Key**：`docker logs nh-download-server` 或 `./data/INITIAL_API_KEY.txt`
@@ -118,6 +120,9 @@ GET/PUT /api/settings                 GET/POST /api/keys     DELETE /api/keys/:i
 ## 更新日志
 
 ### Web 控制台（镜像 5.0.5）
+- 新增 Windows 构建推送脚本 `build-and-push.bat`（纯批处理、可双击快速执行），用法与 `build-and-push.sh` 完全一致；输出为英文（cmd 按系统 ANSI 代码页解析批处理文件，UTF-8 中文会破坏解析，纯 ASCII 最稳）
+- **修复：「登录与安全」输入框样式不一致**——修改密码的密码框（`type=password`）此前漏掉统一样式（无内边距/圆角/主题背景），现与页面其他输入框完全一致
+- **修复：OIDC 表单同排输入框高低不齐**——「Client Secret（公共客户端可留空）」标签折行会把输入框顶低，与同排的 Scopes / 会话有效期错位；现标签折行时同排输入框自动沉底对齐
 - 左下角版本号与**镜像版本号同步**（构建时经 `APP_VERSION` 烧入，与 `IMAGE_TAG` 一致；本地运行取 `package.json` 版本）
 - **CDN 节点延迟栏**：设置 → CDN 节点列表新增「📡 测速」，展示各节点**连接延迟**（服务端实测，快→慢排序，<200ms 绿 / <500ms 黄 / 更慢或失败红；打开设置自动测速）
 - **统计数字按类别着色**：全部=蓝、排队中=紫、下载中=青、已完成=绿、部分失败=黄、失败=红、已取消=灰（0 时半透明）

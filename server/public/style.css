@@ -211,9 +211,10 @@ code {
 .form-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 13px 14px; margin: 12px 0 20px; }
 .field { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); }
 .field.span2 { grid-column: span 2; }
-.field input[type="text"], .field input[type="number"], .field textarea {
+.field input[type="text"], .field input[type="password"], .field input[type="number"], .field textarea {
     width: 100%; padding: 9px 12px; background: var(--bg-soft); color: var(--text);
     border: 1px solid var(--border); border-radius: 9px; outline: none; font-size: 13px; font-family: inherit;
+    margin-top: auto; /* 标签折行时输入框沉底，保证同一行各输入框对齐（如 OIDC 的 Client Secret 折行） */
 }
 .field textarea { resize: vertical; font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
 .field input:focus, .field textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(237, 37, 83, .16); }

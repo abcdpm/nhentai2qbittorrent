@@ -1,6 +1,6 @@
 # ==========================================================
 # nHentai 本地下载服务镜像
-# 构建并推送 Docker Hub:  ./build-and-push.sh
+# 构建并推送 Docker Hub:  ./build-and-push.sh  (Windows: build-and-push.bat)
 # 本地构建运行:            docker compose up -d --build
 # ==========================================================
 FROM node:20-bookworm-slim
