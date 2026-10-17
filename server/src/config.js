@@ -28,6 +28,7 @@ const DEFAULTS = {
     lrrUrl: '',                 // LANraragi 地址，如 http://127.0.0.1:3000；留空=禁用
     lrrApiKey: '',              // LANraragi 设置里的 API Key（自动 base64 后放入 Authorization）
     lrrCategory: '',            // 可选：上传到指定分类 ID
+    lrrDeleteZipAfterUpload: false, // 上传 LANraragi 成功后自动删除本地 zip 压缩包（仅上传成功后删除；默认关闭）
     // 源站适配（高级项，一般无需修改；测试/镜像时可覆盖）
     metaUrlTemplate: 'https://nhentai.net/g/{gid}/',
     apiUrlTemplate: '',         // 留空=不使用官方 API（限流严重，不推荐）；如需可填 https://nhentai.net/api/v2/galleries/{gid}

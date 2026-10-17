@@ -16,7 +16,10 @@ COPY server.js ./
 COPY src ./src
 COPY public ./public
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+# sed 兜底：即使宿主机/检出环境把 .sh 转成了 CRLF（core.autocrlf），
+# 也在此清洗为 LF，避免 shebang 带 \r 导致 "exec ...: no such file or directory"
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh \
+    && chmod +x /usr/local/bin/entrypoint.sh
 
 # 容器内必须监听 0.0.0.0 才能做端口映射；
 # 优先级：环境变量 > /app/data/config.json > 内置默认值（NH_ + 配置项全大写）

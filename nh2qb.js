@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nHentai → Local Image Scraper
 // @namespace    http://tampermonkey.net/
-// @version      5.9.0
+// @version      5.11.0
 // @description  直接提取高清原图下载；「推送到下载服务」自动附带元数据（media_id/Pages数），服务端纯CDN下载避开官方API限流；完整性校验/超时重传/多CDN轮询/WebP统一/自动压缩zip；下载完成自动标记已下载；文件夹格式：本子名 [本子id]
 // @author       Paccu
 // @match        https://nhentai.net/g/*
@@ -78,6 +78,11 @@
     let DL_PATH = localStorage.getItem('nh_dl_path') || 'nHentai';
     let SERVER_URL = (localStorage.getItem('nh_server_url') || 'http://127.0.0.1:8787').replace(/\/+$/, '');
     let SERVER_KEY = localStorage.getItem('nh_server_key') || '';
+    /** 元数据解析间隔（ms）：批量解析/重试时相邻两本之间的间隔，防限流（设置中可配，默认 500） */
+    let META_PARSE_INTERVAL_MS = (() => {
+        const v = parseInt(localStorage.getItem('nh_meta_interval_ms'), 10);
+        return Number.isFinite(v) && v >= 0 ? v : 500;
+    })();
     const CHECK_KEY = 'nh_qb_checked';
     const DOWNLOADED_KEY = 'nh_qb_downloaded_gids';
     const DOWNLOADING_KEY = 'nh_qb_downloading_gids';
@@ -271,6 +276,59 @@
         return null;
     }
 
+    /** ===== 元数据解析失败 → 弹出按钮快速重试并重新传送给下载服务 ===== */
+    let metaRetrySeq = 0;
+    const metaRetryItems = new Map();   // token -> [{gid, title}]（按钮与待重试清单关联）
+
+    /** 生成「重试解析并重新传送」按钮（事件委托统一处理点击） */
+    function metaRetryButtonHtml(items) {
+        const token = 'mrt' + (++metaRetrySeq);
+        metaRetryItems.set(token, (items || []).map(it => ({ gid: String(it.gid), title: it.title || String(it.gid) })));
+        return `<button class="btn btn-success nh-meta-retry-btn" data-nh-meta-retry="${token}" style="margin-top:8px;font-size:12px;min-height:30px;padding:6px 14px;">🔁 重试解析元数据并重新传送给下载服务</button>`;
+    }
+
+    /**
+     * 快速重试：逐本重新解析元数据（各 3 次）→ 重新 POST /api/tasks 传送给下载服务。
+     * 服务端对缺 meta 的活动任务补挂、失败任务随补挂自动重新入队继续下载。
+     */
+    async function retryMetaAndPush(items) {
+        if (!items || !items.length) return;
+        const okItems = [];
+        const stillFailed = [];
+        for (let i = 0; i < items.length; i++) {
+            stickyNotify('nh-meta-retry', `<div class='title'>🔁 正在重试解析元数据 (${i + 1}/${items.length})...</div>`);
+            const meta = await fetchMetaForPush(items[i].gid);
+            if (meta) okItems.push({ gid: items[i].gid, title: items[i].title, meta });
+            else stillFailed.push(items[i]);
+            if (i < items.length - 1 && META_PARSE_INTERVAL_MS > 0) await new Promise(r => setTimeout(r, META_PARSE_INTERVAL_MS));
+        }
+        let result = null;
+        if (okItems.length) result = await pushItemsToServer(okItems);
+        // 关闭进度提示
+        const prog = document.getElementById('nh-meta-retry');
+        if (prog) { prog.classList.remove('show'); prog.style.opacity = '0'; setTimeout(() => { try { prog.remove(); } catch (e) {} }, 400); }
+
+        const revived = result ? ((result.added || []).length + (result.updated || []).length) : 0;
+        const failedItems = result ? stillFailed
+            : okItems.map(it => ({ gid: it.gid, title: it.title })).concat(stillFailed);
+        notify(`
+            <div class='title' style="color:${okItems.length && result ? '#4caf50' : '#ff9800'};">🔁 元数据重试：解析成功 ${okItems.length}/${items.length}${result ? '' : '（重新传送失败）'}</div>
+            ${result && okItems.length ? `<div style="font-size:12px;color:#8bc34a;margin-top:4px;">已重新传送给下载服务${revived ? `（${revived} 本已补挂元数据 / 重新入队）` : ''}</div>` : ''}
+            ${failedItems.length ? `<div style="font-size:12px;color:#ff9800;margin-top:6px;">仍失败（GID ${escapeHtml(failedItems.map(it => String(it.gid)).join('、'))}），可能是页面被 Cloudflare 拦截——可再次重试，或稍后打开对应详情页自动补挂</div>${metaRetryButtonHtml(failedItems)}` : ''}
+        `, Infinity);
+    }
+
+    // 事件委托：点击「重试」按钮（notify 的点击关闭逻辑忽略 BUTTON 目标，不会误关弹窗）
+    document.addEventListener('click', (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest('.nh-meta-retry-btn') : null;
+        if (!btn) return;
+        const items = metaRetryItems.get(btn.getAttribute('data-nh-meta-retry')) || [];
+        if (!items.length) return;
+        btn.disabled = true;
+        btn.textContent = '重试中…';
+        retryMetaAndPush(items);
+    });
+
     /** 将若干本子推送到本地下载服务的队列 */
     async function pushItemsToServer(items) {
         if (!items.length) { notify(`<div class='title'>提示</div>请先勾选要推送的本子！`, 4000); return null; }
@@ -288,7 +346,7 @@
             if (it.meta) continue;
             stickyNotify('nh-push-progress', `<div class='title'>正在解析元数据 (${i + 1}/${items.length})...</div>`);
             it.meta = await fetchMetaForPush(it.gid);
-            if (i < items.length - 1) await new Promise(r => setTimeout(r, 350));
+            if (i < items.length - 1 && META_PARSE_INTERVAL_MS > 0) await new Promise(r => setTimeout(r, META_PARSE_INTERVAL_MS));
         }
         // DOM 标题提取失败回退成 gid 的场景：用元数据标题回填（服务端仍会二次兜底）
         for (const it of items) {
@@ -316,10 +374,11 @@
             requestRender();
         }
         if (res.json) {
-            const missing = items.filter(it => !it.meta).map(it => String(it.gid));
+            const missingItems = items.filter(it => !it.meta);
+            const missing = missingItems.map(it => String(it.gid));
             res.json.metaMissing = missing;
             res.json.metaInfo = missing.length
-                ? `<span style="color:#ff9800;">⚠ 元数据 ${metaOk}/${items.length} 随任务上传；${missing.length} 本解析失败（GID ${escapeHtml(missing.join('、'))}）——服务端将尝试自行抓取，可能被 Cloudflare 拦截。请稍后打开对应详情页，脚本会自动补上元数据</span>`
+                ? `<span style="color:#ff9800;">⚠ 元数据 ${metaOk}/${items.length} 随任务上传；${missing.length} 本解析失败（GID ${escapeHtml(missing.join('、'))}）——服务端将尝试自行抓取（可能被 Cloudflare 拦截）</span><br>${metaRetryButtonHtml(missingItems)}`
                 : `<span style="color:#8bc34a;">元数据 ${metaOk}/${items.length} 随任务上传（服务端零元数据请求）</span>`;
         }
         // 推送后快速同步两轮（下载通常几秒完成，及时标记「已下载」）
@@ -341,7 +400,11 @@
         const title = extractPageTitle() || gid;
         const meta = await fetchMetaForPush(gid, document.documentElement.innerHTML);
         if (!meta) {
-            notify(`<div class='title'>⚠ 元数据补挂失败</div><div style="font-size:12px;color:#ccc;">无法从当前页面解析本子 ${gid} 的元数据，任务暂时无法下载</div>`, 8000);
+            notify(`
+                <div class='title'>⚠ 元数据补挂失败</div>
+                <div style="font-size:12px;color:#ccc;">无法从当前页面解析本子 ${escapeHtml(gid)} 的元数据，任务暂时无法下载</div>
+                ${metaRetryButtonHtml([{ gid, title }])}
+            `, Infinity);
             return;
         }
         const result = await pushItemsToServer([{ gid, title, meta }]);
@@ -1204,6 +1267,14 @@
                 </div>
             </div>
             
+            <div class="field-group">
+                <label>元数据解析间隔（毫秒，批量解析/重试时相邻两本的间隔，防限流）：</label>
+                <input type="text" id="nhq_meta_interval" value="${escapeHtml(String(META_PARSE_INTERVAL_MS))}" placeholder="默认 500">
+                <div class="nhqb-helper">
+                    「推送到下载服务」批量解析元数据或点「重试解析」时生效；填 0 表示不等待。建议保持默认 500ms，间隔过小容易触发 nHentai 限流。
+                </div>
+            </div>
+
             <div class="divider">
                 <label>历史记录管理：</label>
                 <div style="display:flex; gap:10px; margin-top:10px;">
@@ -1302,6 +1373,9 @@
             SERVER_KEY = modal.querySelector('#nhq_server_key').value.trim();
             localStorage.setItem('nh_server_url', SERVER_URL);
             localStorage.setItem('nh_server_key', SERVER_KEY);
+            const iv = parseInt(modal.querySelector('#nhq_meta_interval').value, 10);
+            META_PARSE_INTERVAL_MS = Number.isFinite(iv) && iv >= 0 ? iv : 500;
+            localStorage.setItem('nh_meta_interval_ms', String(META_PARSE_INTERVAL_MS));
             notify(`<div class='title'>配置已保存</div>`, 3000); overlay.remove();
         });
     }

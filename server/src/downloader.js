@@ -164,6 +164,22 @@ async function removeDirWithRetry(dir) {
     return false;
 }
 
+/**
+ * 删除单个文件（SMB/FUSE 占用场景下重试 3 次），返回是否成功
+ */
+async function removeFileWithRetry(file) {
+    for (let i = 1; i <= 3; i++) {
+        try {
+            fs.rmSync(file, { force: true });
+            return true;
+        } catch (e) {
+            if (i >= 3) return false;
+            await sleep(1000 * i);   // SMB 占用时稍候会自动释放
+        }
+    }
+    return false;
+}
+
 /**************************************************************************
  * 下载引擎：多 CDN 轮询 + 超时重传 + 完整性校验 + 间隔控制 + WebP 统一
  **************************************************************************/
@@ -475,6 +491,16 @@ class Downloader {
                         try {
                             const lrr = await uploadToLanraragi(zipPath, task, cfg, this.logger);
                             task.lrrUploaded = { arcid: (lrr && (lrr.arcid || lrr.id)) || null, at: nowIso() };
+                            // 上传成功后按设置删除本地 zip（LANraragi 已接管内容；删除失败仅告警并保留压缩包）
+                            if (cfg.get('lrrDeleteZipAfterUpload')) {
+                                if (await removeFileWithRetry(zipPath)) {
+                                    task.zipDeletedAfterLrr = true;
+                                    log(`已按设置删除本地压缩包（已上传 LANraragi）: ${zipName}`);
+                                } else {
+                                    task.zipDeleteError = '上传成功但本地压缩包被占用未能删除（SMB 占用中）';
+                                    log(`⚠ ${task.zipDeleteError}`);
+                                }
+                            }
                         } catch (e) {
                             task.lrrError = e.message;
                             if (this.logger) this.logger.warn(`[gid:${task.gid}] ⚠ LANraragi 上传失败（不影响本任务）: ${e.message}`);

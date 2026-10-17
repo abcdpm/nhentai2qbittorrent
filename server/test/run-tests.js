@@ -846,13 +846,13 @@ test('POST /api/queue/clear-completed：清空已下载记录（磁盘保留）+
         r = await call('/api/history/import', 'POST', { gids: ['666'] });
         assert.strictEqual(r.data.added, 1, '对象格式 {gids:[...]} 亦可导入');
 
-        // 历史列表：云端清单 ∪ 已完成任务；标题从任务记录补全
+        // 历史列表：云端清单 ∪ 已完成任务（仅记录 gid，不记录/返回标题）
         r = await call('/api/history');
-        const gids = r.data.entries.map(e => e.gid);
+        const gids = r.data.gids;
         for (const g of ['444', '555', '666', '111', '222']) assert.ok(gids.includes(g), `历史应含 ${g}`);
         assert.ok(!gids.includes('333'), '排队中的任务不算历史下载');
-        const e111 = r.data.entries.find(e => e.gid === '111');
-        assert.strictEqual(e111.title, '本子A', '标题应从任务记录补全');
+        assert.ok(gids.every(g => typeof g === 'string'), '历史条目应仅为 gid 字符串');
+        assert.ok(!JSON.stringify(r.data).includes('本子A'), '历史接口不应记录/返回标题');
 
         // 导出为与前端一致的 JSON 数组
         const res2 = await fetch(base + '/api/history/export', { headers: { 'X-API-Key': created.raw } });
@@ -870,7 +870,7 @@ test('POST /api/queue/clear-completed：清空已下载记录（磁盘保留）+
 
         // 清空后：云端导入的历史记录仍然保留
         r = await call('/api/history');
-        const gids2 = r.data.entries.map(e => e.gid);
+        const gids2 = r.data.gids;
         for (const g of ['444', '555', '666']) assert.ok(gids2.includes(g), `清空后云端历史应保留 ${g}`);
     } finally {
         server.close();
@@ -1373,6 +1373,69 @@ test('压缩后自动上传 LANraragi（Bearer 认证 / 标题 / source 标签 /
         assert.ok(up.hasTitle, '应携带标题');
         assert.ok(up.hasSource, '应携带 source:nhentai.net/g/ 标签（与 LRR 插件闭环）');
         assert.ok(up.hasSha1Field, '应携带 SHA1 校验字段');
+
+        // 默认（lrrDeleteZipAfterUpload=false）：上传成功后本地 zip 仍保留
+        const zipPath = path.join(env.config.get('downloadDir'), '[作者A] 测试本子标题 [123001].zip');
+        assert.ok(fs.existsSync(zipPath), '默认应保留本地 zip 压缩包');
+        assert.ok(!task.zipDeletedAfterLrr, '默认不删除 zip');
+    } finally {
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('LRR 上传成功后可选自动删除本地 zip（lrrDeleteZipAfterUpload，删除仅发生在上传成功后）', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    env.config.data.zipAfterVerify = true;
+    env.config.data.lrrUrl = `http://127.0.0.1:${mock.port}`;
+    env.config.data.lrrDeleteZipAfterUpload = true;
+    try {
+        const { added } = env.queue.enqueue([{
+            gid: '123001', title: '[作者A] 测试本子标题',
+            meta: { mediaId: '900001', numPages: 3, extMap: ['jpg', 'png', 'webp'], coverHost: null }
+        }]);
+        env.queue.start();
+        const task = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 20000, '任务完成');
+
+        assert.strictEqual(task.status, 'completed');
+        assert.ok(task.lrrUploaded && task.lrrUploaded.arcid, '应上传成功');
+        assert.ok(mock.state.lrrUploads.length >= 1, '应先完成上传再删除');
+        assert.strictEqual(task.zipDeletedAfterLrr, true, '上传成功后应删除本地 zip');
+        assert.ok(!task.zipDeleteError, '不应有删除错误');
+        const zipPath = path.join(env.config.get('downloadDir'), '[作者A] 测试本子标题 [123001].zip');
+        assert.ok(!fs.existsSync(zipPath), '本地 zip 压缩包应已删除');
+    } finally {
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('LRR 上传失败时绝不删除本地 zip（即使 lrrDeleteZipAfterUpload=true）', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    env.config.data.zipAfterVerify = true;
+    env.config.data.lrrUrl = 'http://127.0.0.1:1';   // 不可达地址：上传必失败
+    env.config.data.lrrDeleteZipAfterUpload = true;
+    try {
+        const { added } = env.queue.enqueue([{
+            gid: '123001', title: '[作者A] 测试本子标题',
+            meta: { mediaId: '900001', numPages: 3, extMap: ['jpg', 'png', 'webp'], coverHost: null }
+        }]);
+        env.queue.start();
+        const task = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 20000, '任务完成');
+
+        assert.strictEqual(task.status, 'completed', '上传失败不影响任务本身');
+        assert.ok(task.lrrError, '应记录上传失败');
+        assert.ok(!task.zipDeletedAfterLrr, '上传失败不应删除 zip');
+        const zipPath = path.join(env.config.get('downloadDir'), '[作者A] 测试本子标题 [123001].zip');
+        assert.ok(fs.existsSync(zipPath), '本地 zip 压缩包应保留');
     } finally {
         await env.queue.stop();
         mock.close();

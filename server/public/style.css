@@ -238,6 +238,23 @@ code {
 .table th { text-align: left; color: var(--muted); font-weight: 600; padding: 9px 10px; border-bottom: 1px solid var(--border); }
 .table td { padding: 11px 10px; border-bottom: 1px solid rgba(255, 255, 255, .05); }
 
+/* ---------- 历史下载记录（仅 gid） ---------- */
+.gid-list {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr));
+    gap: 8px; margin-top: 12px;
+}
+.gid-list a {
+    display: block; padding: 9px 6px; text-align: center; overflow: hidden;
+    white-space: nowrap; text-overflow: ellipsis;
+    background: var(--bg-soft); border: 1px solid var(--border); border-radius: 9px;
+    color: var(--accent); text-decoration: none;
+    font-family: ui-monospace, Consolas, monospace; font-size: 12.5px;
+    transition: border-color .15s ease, background .15s ease;
+}
+.gid-list a:hover { border-color: var(--accent); background: rgba(237, 37, 83, .1); }
+.gid-list .muted { grid-column: 1 / -1; text-align: center; padding: 28px 0; }
+.gid-list .muted.small { padding: 12px 0; }
+
 /* ---------- 日志 ---------- */
 .log-list {
     background: var(--bg-soft); border: 1px solid var(--border); border-radius: 10px;

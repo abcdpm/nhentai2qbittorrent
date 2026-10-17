@@ -91,17 +91,14 @@
                 <div class="card-head-row">
                     <h3>历史下载记录</h3>
                     <div class="key-create" style="margin:0;">
-                        <input type="text" id="history-search" placeholder="搜索 gid / 标题">
+                        <input type="text" id="history-search" placeholder="搜索 gid">
                         <button id="btn-history-export" class="btn">⬇️ 备份到本地</button>
                         <button id="btn-history-import" class="btn">⬆️ 从文件导入</button>
                         <input type="file" id="history-import-input" accept=".json,application/json" style="display:none;">
                     </div>
                 </div>
                 <div class="muted small" id="history-summary"></div>
-                <table class="table" id="history-table">
-                    <thead><tr><th style="width:130px;">GID</th><th>标题</th></tr></thead>
-                    <tbody></tbody>
-                </table>
+                <div class="gid-list" id="history-list"></div>
             </div>
         </section>
 
@@ -146,6 +143,7 @@
                         <label class="field span2"><span>LANraragi 地址（如 http://127.0.0.1:3000；留空=禁用）</span><input type="text" id="set-lrrUrl" placeholder="留空禁用"></label>
                         <label class="field"><span>API Key（LRR → 设置 生成）</span><input type="text" id="set-lrrApiKey" placeholder="可选"></label>
                         <label class="field"><span>分类 ID（可选）</span><input type="text" id="set-lrrCategory" placeholder="可选"></label>
+                        <label class="field check span2"><input type="checkbox" id="set-lrrDeleteZipAfterUpload"><span>上传成功后自动删除本地 zip 压缩包（LANraragi 已接管内容；仅上传成功后删除，默认关闭）</span></label>
                         <div class="field span2">
                             <span>连接测试</span>
                             <div class="inline-row">

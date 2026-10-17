@@ -250,7 +250,7 @@
                             <span>目录: <code>${esc(t.folder)}</code></span>
                             ${t.downloadedBytes ? `<span>已下载 ${formatBytes(t.downloadedBytes)}</span>` : ''}
                             ${t.convertedToWebp ? '<span>WebP ✓</span>' : ''}
-                            ${t.zipFile ? `<span>📦 ZIP ✓${t.zipBytes ? ' ' + formatBytes(t.zipBytes) : ''}</span>` : ''}
+                            ${t.zipFile ? `<span>📦 ZIP ✓${t.zipBytes ? ' ' + formatBytes(t.zipBytes) : ''}${t.zipDeletedAfterLrr ? '（已上传 LRR，本地已删除）' : ''}</span>` : ''}
                             ${t.startedAt ? `<span>开始 ${esc(fmtLocalTime(t.startedAt))}</span>` : ''}
                         </div>
                     </div>
@@ -340,6 +340,7 @@
             $('#set-keepOriginal').checked = !!s.keepOriginal;
             $('#set-zipAfterVerify').checked = !!s.zipAfterVerify;
             $('#set-keepFolderAfterZip').checked = !!s.keepFolderAfterZip;
+            $('#set-lrrDeleteZipAfterUpload').checked = !!s.lrrDeleteZipAfterUpload;
             $('#set-preferCoverHost').checked = !!s.preferCoverHost;
             $('#set-cdnBaseUrls').value = (s.cdnBaseUrls || []).join('\n');
             $('#sharp-status').textContent = d.sharpAvailable
@@ -361,6 +362,7 @@
         patch.keepOriginal = $('#set-keepOriginal').checked;
         patch.zipAfterVerify = $('#set-zipAfterVerify').checked;
         patch.keepFolderAfterZip = $('#set-keepFolderAfterZip').checked;
+        patch.lrrDeleteZipAfterUpload = $('#set-lrrDeleteZipAfterUpload').checked;
         patch.preferCoverHost = $('#set-preferCoverHost').checked;
         patch.cdnBaseUrls = $('#set-cdnBaseUrls').value.split('\n').map(v => v.trim()).filter(Boolean);
         try {
@@ -429,7 +431,7 @@
     async function loadHistory() {
         try {
             const d = await api('/api/history');
-            state.history = d.entries || [];
+            state.history = (d.gids || []).map(String);
             renderHistory();
         } catch (e) {
             toast('加载历史记录失败：' + esc(e.message), 'err');
@@ -437,22 +439,19 @@
     }
 
     function renderHistory() {
-        const q = ($('#history-search').value || '').trim().toLowerCase();
-        const rows = (state.history || []).filter(e =>
-            !q || String(e.gid).includes(q) || (e.title || '').toLowerCase().includes(q));
-        $('#history-summary').textContent = `共 ${state.history.length} 条历史记录${q ? `，搜索命中 ${rows.length} 条` : ''}`;
-        const tbody = $('#history-table tbody');
+        const all = (state.history || []).map(String);
+        const q = ($('#history-search').value || '').trim();
+        const rows = all.filter(g => !q || g.includes(q));
+        $('#history-summary').textContent = `共 ${all.length} 条历史记录${q ? `，搜索命中 ${rows.length} 条` : ''}`;
+        const box = $('#history-list');
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="2" class="muted">暂无记录</td></tr>';
+            box.innerHTML = '<div class="muted">暂无记录</div>';
             return;
         }
         const shown = rows.slice(0, 500);
-        tbody.innerHTML = shown.map(e => `
-            <tr>
-                <td><a href="https://nhentai.net/g/${esc(e.gid)}/" target="_blank" style="color:#ed2553;text-decoration:none;"><code>${esc(e.gid)}</code></a></td>
-                <td>${esc(e.title || '（未记录标题）')}</td>
-            </tr>`).join('') +
-            (rows.length > 500 ? `<tr><td colspan="2" class="muted small">… 仅显示前 500 条，请用搜索过滤</td></tr>` : '');
+        box.innerHTML = shown.map(g =>
+            `<a href="https://nhentai.net/g/${esc(g)}/" target="_blank" title="在 nHentai 打开 ${esc(g)}">${esc(g)}</a>`
+        ).join('') + (rows.length > 500 ? '<div class="muted small">… 仅显示前 500 条，请用搜索过滤</div>' : '');
     }
 
     async function exportHistory() {

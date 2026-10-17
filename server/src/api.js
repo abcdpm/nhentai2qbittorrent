@@ -137,21 +137,13 @@ function probeConnection(rawUrl, timeoutMs = 5000) {
 function createHandler(ctx) {
     const { config, store, keys, queue, logger, downloader, state, janitor, auth } = ctx;
 
-    /** 历史下载记录：云端清单 ∪ 服务端已完成任务，尽量补全标题 */
+    /** 历史下载记录：云端清单 ∪ 服务端已完成任务（仅记录 gid，不记录标题） */
     function historyData() {
         const s = state.get();
-        const titles = {};
-        for (const t of store.list()) {
-            if (t.title && !titles[String(t.gid)]) titles[String(t.gid)] = t.title;
-        }
-        for (const [g, t] of Object.entries(s.checked)) {
-            if (t && !titles[String(g)]) titles[String(g)] = String(t);
-        }
         const set = new Set(s.downloadedGids);
         for (const t of store.list({ status: 'completed' })) set.add(String(t.gid));
         const gids = [...set].sort((a, b) => Number(b) - Number(a));
-        const entries = gids.map(g => ({ gid: g, title: titles[g] || '' }));
-        return { total: gids.length, gids, entries };
+        return { total: gids.length, gids };
     }
 
     return async function handler(req, res) {
