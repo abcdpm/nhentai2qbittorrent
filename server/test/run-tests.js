@@ -21,6 +21,7 @@ const { galleryFolderName, sanitizeFileName } = require('../src/util');
 const { readZipEntries, extractZipEntry, crc32, numericNameCompare, createZipFromDir } = require('../src/zip');
 const { StateStore } = require('../src/state');
 const { FolderJanitor } = require('../src/janitor');
+const { AuthManager } = require('../src/auth');
 
 /**************************************************************************
  * mock 源站：/g/:gid/ 详情页 + /:cdn/galleries/:media/:file 图片
@@ -1158,6 +1159,191 @@ test('元数据自愈通道：缺 meta 任务补挂 / needMeta 通告 / 旧版 a
     }
 });
 
+test('Web 登录：账号密码 + 会话 Cookie + 登出 + 修改密码（API Key 保持可用）', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    const keys = new KeyStore(env.tmp, env.logger);
+    const created = keys.create('测试密钥');
+    const auth = new AuthManager({ dataDir: env.tmp, config: env.config, logger: env.logger });
+    const boot = auth.ensureBootstrapUser();
+    assert.ok(boot && boot.username === 'admin' && boot.password, '首次启动应生成登录账号');
+    assert.ok(fs.existsSync(path.join(env.tmp, 'INITIAL_PASSWORD.txt')), '初始密码应写入 INITIAL_PASSWORD.txt');
+
+    const handler = createHandler({
+        config: env.config, store: env.store, keys, queue: env.queue,
+        logger: env.logger, downloader: env.downloader, state: new StateStore(env.tmp), auth
+    });
+    const server = http.createServer((req, res) => handler(req, res).catch(() => { res.writeHead(500); res.end(); }));
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const post = (p, body, cookie) => fetch(base + p, {
+        method: 'POST',
+        headers: Object.assign({ 'Content-Type': 'application/json' }, cookie ? { Cookie: cookie } : {}),
+        body: JSON.stringify(body)
+    });
+    try {
+        // 登录配置公开
+        let res = await fetch(base + '/api/auth/config');
+        let d = await res.json();
+        assert.strictEqual(d.oidc, false, '未配置 OIDC 时 oidc=false（前端显示账号密码入口）');
+        assert.strictEqual(d.passwordLogin, true);
+
+        // 错误密码拒绝
+        res = await post('/api/auth/login', { username: 'admin', password: 'wrong' });
+        assert.strictEqual(res.status, 401);
+
+        // 正确密码 → HttpOnly 会话 Cookie
+        res = await post('/api/auth/login', { username: boot.username, password: boot.password });
+        assert.strictEqual(res.status, 200);
+        const setCookie = res.headers.get('set-cookie') || '';
+        assert.ok(/nh_sid=/.test(setCookie) && /HttpOnly/.test(setCookie), '会话应为 HttpOnly Cookie');
+        const sid = setCookie.split(';')[0];
+
+        // 无凭据 401；带会话放行
+        res = await fetch(base + '/api/stats');
+        assert.strictEqual(res.status, 401);
+        res = await fetch(base + '/api/stats', { headers: { Cookie: sid } });
+        assert.strictEqual(res.status, 200, '会话 Cookie 应可访问 API');
+
+        res = await fetch(base + '/api/auth/me', { headers: { Cookie: sid } });
+        d = await res.json();
+        assert.strictEqual(d.user.username, boot.username);
+        assert.strictEqual(d.user.via, 'password');
+
+        // 修改密码：旧密码失效、新密码可登录
+        res = await post('/api/auth/password', { currentPassword: boot.password, newPassword: 'newpass123' }, sid);
+        assert.strictEqual(res.status, 200);
+        res = await post('/api/auth/login', { username: boot.username, password: boot.password });
+        assert.strictEqual(res.status, 401, '旧密码应失效');
+        res = await post('/api/auth/login', { username: boot.username, password: 'newpass123' });
+        assert.strictEqual(res.status, 200);
+
+        // 登出后旧会话失效
+        res = await post('/api/auth/logout', {}, sid);
+        assert.strictEqual(res.status, 200);
+        res = await fetch(base + '/api/stats', { headers: { Cookie: sid } });
+        assert.strictEqual(res.status, 401, '登出后会话应失效');
+
+        // API Key（油猴脚本）保持可用
+        res = await fetch(base + '/api/stats', { headers: { 'X-API-Key': created.raw } });
+        assert.strictEqual(res.status, 200, 'API Key 鉴权应保持可用');
+    } finally {
+        server.close();
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('OIDC 单点登录全链路（Mock IdP：discovery / PKCE / RS256 验签 / 会话）', async () => {
+    const crypto = require('crypto');
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+    const jwk = Object.assign(publicKey.export({ format: 'jwk' }), { kid: 'test-key', alg: 'RS256', use: 'sig' });
+    let authReq = null;            // 由测试从授权跳转 URL 提取 { state, nonce, challenge }
+    let pkceOk = false;
+
+    const idp = http.createServer((req, res) => {
+        const u = new URL(req.url, 'http://x');
+        const idpBase = `http://127.0.0.1:${idp.address().port}`;
+        const json = (obj) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+        if (u.pathname === '/.well-known/openid-configuration') {
+            json({
+                issuer: idpBase,
+                authorization_endpoint: idpBase + '/authorize',
+                token_endpoint: idpBase + '/token',
+                jwks_uri: idpBase + '/jwks'
+            });
+            return;
+        }
+        if (u.pathname === '/jwks') { json({ keys: [jwk] }); return; }
+        if (u.pathname === '/token') {
+            let body = '';
+            req.on('data', c => { body += c; });
+            req.on('end', () => {
+                const p = new URLSearchParams(body);
+                // PKCE 校验：sha256(code_verifier) 必须等于授权请求里的 code_challenge
+                const challenge = crypto.createHash('sha256').update(p.get('code_verifier') || '').digest('base64url');
+                pkceOk = challenge === authReq.challenge;
+                const now = Math.floor(Date.now() / 1000);
+                const h = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: 'test-key' })).toString('base64url');
+                const pl = Buffer.from(JSON.stringify({
+                    iss: idpBase, sub: 'user-001', aud: 'test-client',
+                    exp: now + 600, iat: now, nonce: authReq.nonce, preferred_username: 'sso-user'
+                })).toString('base64url');
+                const signer = crypto.createSign('RSA-SHA256');
+                signer.update(h + '.' + pl);
+                const sig = signer.sign(privateKey).toString('base64url');
+                json({ access_token: 'at', token_type: 'Bearer', id_token: `${h}.${pl}.${sig}` });
+            });
+            return;
+        }
+        res.writeHead(404); res.end();
+    });
+    await new Promise(r => idp.listen(0, '127.0.0.1', r));
+
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    const keys = new KeyStore(env.tmp, env.logger);
+    keys.create('k');
+    env.config.data.oidcIssuer = `http://127.0.0.1:${idp.address().port}`;
+    env.config.data.oidcClientId = 'test-client';
+    const auth = new AuthManager({ dataDir: env.tmp, config: env.config, logger: env.logger });
+    auth.ensureBootstrapUser();
+    const handler = createHandler({
+        config: env.config, store: env.store, keys, queue: env.queue,
+        logger: env.logger, downloader: env.downloader, state: new StateStore(env.tmp), auth
+    });
+    const server = http.createServer((req, res) => handler(req, res).catch(() => { res.writeHead(500); res.end(); }));
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+        // ① auth/config 报告 oidc 已启用（前端据此自动隐藏账号密码入口）
+        let res = await fetch(base + '/api/auth/config');
+        let d = await res.json();
+        assert.strictEqual(d.oidc, true);
+
+        // ② 发起登录 → 302 到 IdP（携带 PKCE / nonce / state）
+        res = await fetch(base + '/auth/oidc/login', { redirect: 'manual' });
+        assert.strictEqual(res.status, 302);
+        const loc = new URL(res.headers.get('location'));
+        assert.ok(loc.href.startsWith(`http://127.0.0.1:${idp.address().port}/authorize`), '应跳转到 IdP 授权端点');
+        assert.strictEqual(loc.searchParams.get('code_challenge_method'), 'S256');
+        assert.strictEqual(loc.searchParams.get('client_id'), 'test-client');
+        authReq = {
+            state: loc.searchParams.get('state'),
+            nonce: loc.searchParams.get('nonce'),
+            challenge: loc.searchParams.get('code_challenge')
+        };
+
+        // ③ 模拟 IdP 回跳 → 换 token + 验签 → 建会话
+        res = await fetch(`${base}/auth/oidc/callback?code=good-code&state=${authReq.state}`, { redirect: 'manual' });
+        assert.strictEqual(res.status, 302);
+        assert.strictEqual(res.headers.get('location'), '/');
+        const setCookie = res.headers.get('set-cookie') || '';
+        assert.ok(/nh_sid=/.test(setCookie), 'OIDC 登录成功应创建会话');
+        const sid = setCookie.split(';')[0];
+        assert.ok(pkceOk, 'token 交换应通过 PKCE code_verifier 校验');
+
+        res = await fetch(base + '/api/auth/me', { headers: { Cookie: sid } });
+        d = await res.json();
+        assert.strictEqual(d.user.username, 'sso-user');
+        assert.strictEqual(d.user.via, 'oidc');
+
+        // ④ 非法 state → 拒绝并引导到备用登录
+        res = await fetch(`${base}/auth/oidc/callback?code=x&state=bogus`, { redirect: 'manual' });
+        assert.strictEqual(res.status, 302);
+        assert.ok((res.headers.get('location') || '').includes('login=local'), 'OIDC 失败应引导到备用登录入口');
+
+        // ⑤ state 一次性：重放同一 state 应失败
+        res = await fetch(`${base}/auth/oidc/callback?code=good-code&state=${authReq.state}`, { redirect: 'manual' });
+        assert.ok((res.headers.get('location') || '').includes('login=local'), 'state 不可重放');
+    } finally {
+        server.close();
+        idp.close();
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
 test('压缩后自动上传 LANraragi（Bearer 认证 / 标题 / source 标签 / SHA1）', async () => {
     const mock = await createMockSite(GALLERY_1);
     const env = makeEnv(mock);
@@ -1325,6 +1511,10 @@ test('Web 界面与静态资源可访问（无需密钥）', async () => {
         assert.strictEqual(css.status, 200);
         const js = await fetch(base + '/app.js');
         assert.strictEqual(js.status, 200);
+        const jsText = await js.text();
+        assert.ok(jsText.includes('data-act="open"') && jsText.includes('nhentai.net/g/'),
+            '失败任务条目应提供一键跳转 nHentai 页面的按钮');
+        assert.ok(jsText.includes('gid-link'), 'GID 应渲染为可点击的 nHentai 跳转链接');
     } finally {
         server.close();
         await env.queue.stop();

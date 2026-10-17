@@ -20,6 +20,7 @@ const { Downloader } = require('./src/downloader');
 const { QueueManager } = require('./src/queue');
 const { StateStore } = require('./src/state');
 const { FolderJanitor } = require('./src/janitor');
+const { AuthManager } = require('./src/auth');
 const { createHandler } = require('./src/api');
 
 const ROOT = __dirname;
@@ -64,7 +65,20 @@ function bootstrap() {
     queue.start();
 
     const state = new StateStore(DATA_DIR);
-    const handler = createHandler({ config, store, keys, queue, logger, downloader, state, janitor });
+    const auth = new AuthManager({ dataDir: DATA_DIR, config, logger });
+    const bootUser = auth.ensureBootstrapUser();
+    if (bootUser) {
+        logger.warn('========== 首次启动已自动生成 Web 登录账号 ==========');
+        logger.warn(`用户名: ${bootUser.username}`);
+        logger.warn(`密  码: ${bootUser.password}`);
+        logger.warn(`同时已写入文件: ${path.join(DATA_DIR, 'INITIAL_PASSWORD.txt')}（登录后请修改密码并删除该文件）`);
+        logger.warn('也可通过环境变量 NH_AUTH_USER / NH_AUTH_PASSWORD 预设账号');
+        logger.warn('====================================================');
+    }
+    if (auth.isOidcEnabled()) {
+        logger.info(`OIDC 单点登录已启用（SSO 为登录主入口，账号密码为备用：/?login=local）`);
+    }
+    const handler = createHandler({ config, store, keys, queue, logger, downloader, state, janitor, auth });
     const server = http.createServer((req, res) => {
         handler(req, res).catch(e => {
             logger.error(`未捕获的请求异常: ${e.message}`);

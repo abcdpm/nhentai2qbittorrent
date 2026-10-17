@@ -5,21 +5,26 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>nHentai 下载服务</title>
 <link rel="icon" type="image/svg+xml" href="favicon.svg">
-<link rel="stylesheet" href="style.css?v=5.0.5">
+<link rel="stylesheet" href="style.css?v=5.0.6">
 </head>
 <body>
 
-<!-- ============ API Key 鉴权门 ============ -->
+<!-- ============ 登录门（SSO 主入口 / 账号密码备用）============ -->
 <div id="gate" class="gate">
     <div class="gate-card">
         <div class="gate-logo">📥</div>
         <h1>nHentai 下载服务</h1>
-        <p class="muted">此服务受 API Key 保护，输入密钥以进入控制台</p>
-        <input id="gate-key" type="password" placeholder="nhk_xxxxxxxx..." autocomplete="off" spellcheck="false">
-        <button id="gate-submit" class="btn primary wide">进入控制台</button>
+        <p class="muted" id="gate-sub">登录以进入控制台</p>
+        <button id="gate-sso" class="btn primary wide hidden">🔐 使用 SSO 登录</button>
+        <div id="gate-local-wrap">
+            <input id="gate-user" type="text" placeholder="用户名" autocomplete="username" spellcheck="false">
+            <input id="gate-pass" type="password" placeholder="密码" autocomplete="current-password">
+            <button id="gate-submit" class="btn primary wide">登录</button>
+        </div>
         <div id="gate-error" class="error-text"></div>
-        <div class="gate-help">
-            首次使用？密钥在服务启动日志中打印，或查看 <code>server/data/INITIAL_API_KEY.txt</code>
+        <div class="gate-help" id="gate-help">
+            首次使用？账号密码在服务启动日志中打印，或查看 <code>server/data/INITIAL_PASSWORD.txt</code>；
+            API / 油猴脚本调用仍使用 <code>X-API-Key</code>
         </div>
     </div>
 </div>
@@ -45,7 +50,7 @@
         <div class="sidebar-foot">
             <div id="conn-status" class="conn"><span class="dot"></span><span id="conn-text">已连接</span></div>
             <div class="muted small">v<span id="ver-text">1.0.0</span></div>
-            <button id="btn-logout" class="btn ghost small">更换 API Key</button>
+            <button id="btn-logout" class="btn ghost small">退出登录</button>
         </div>
     </aside>
 
@@ -176,6 +181,31 @@
                         <label class="field span2"><span>User-Agent</span><input type="text" id="set-userAgent"></label>
                     </div>
                 </div>
+
+                <div class="card">
+                    <h3>登录与安全</h3>
+                    <p class="muted small">Web 控制台登录：OIDC 单点登录为主要入口；账号密码为备用登录（OIDC 启用后登录页自动隐藏账号密码入口，可手动访问 <code>?login=local</code> 进入）。API / 油猴脚本调用继续使用 <code>X-API-Key</code>。</p>
+                    <h3>修改登录密码</h3>
+                    <div class="form-grid">
+                        <label class="field"><span>当前密码</span><input type="password" id="pw-current" autocomplete="current-password"></label>
+                        <label class="field"><span>新密码（至少 6 位）</span><input type="password" id="pw-new" autocomplete="new-password"></label>
+                        <div class="field span2">
+                            <div class="inline-row">
+                                <button id="btn-change-pw" class="btn">🔐 修改密码</button>
+                                <span id="pw-status" class="muted small"></span>
+                            </div>
+                        </div>
+                    </div>
+                    <h3>OIDC 单点登录（主登录入口）</h3>
+                    <div class="form-grid">
+                        <label class="field span2"><span>Issuer 地址（如 https://accounts.example.com；留空=不启用 SSO）</span><input type="text" id="set-oidcIssuer" placeholder="留空=禁用 SSO"></label>
+                        <label class="field"><span>Client ID</span><input type="text" id="set-oidcClientId" placeholder="必填（启用 SSO 时）"></label>
+                        <label class="field"><span>Client Secret（公共客户端可留空）</span><input type="text" id="set-oidcClientSecret" placeholder="可选"></label>
+                        <label class="field"><span>Scopes</span><input type="text" id="set-oidcScopes" placeholder="openid profile email"></label>
+                        <label class="field"><span>会话有效期（天）</span><input type="number" id="set-sessionTtlDays" min="1" max="365"></label>
+                        <label class="field span2"><span>回调地址（留空=自动推导；子路径反代部署时可显式指定，如 https://host/nhentai/auth/oidc/callback）</span><input type="text" id="set-oidcRedirectUri" placeholder="留空=自动推导"></label>
+                    </div>
+                </div>
             </div>
         </section>
 
@@ -257,6 +287,6 @@
         </div>
     </div>
 </div>
-<script src="app.js?v=5.0.5"></script>
+<script src="app.js?v=5.0.6"></script>
 </body>
 </html>

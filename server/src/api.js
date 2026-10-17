@@ -6,6 +6,7 @@ const net = require('net');
 const { parse } = require('url');
 
 const VERSION = process.env.APP_VERSION || (() => { try { return require('../package.json').version; } catch (e) { return 'dev'; } })();
+const { SESSION_COOKIE } = require('./auth');
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MIME = {
     '.html': 'text/html; charset=utf-8',
@@ -17,16 +18,33 @@ const MIME = {
     '.json': 'application/json; charset=utf-8'
 };
 
-function sendJson(res, status, data) {
+function sendJson(res, status, data, extraHeaders) {
     const body = JSON.stringify(data);
-    res.writeHead(status, {
+    res.writeHead(status, Object.assign({
         'Content-Type': 'application/json; charset=utf-8',
         'Content-Length': Buffer.byteLength(body),
         'Access-Control-Allow-Origin': '*',
         'Access-Control-Allow-Headers': 'Content-Type, X-API-Key, Authorization',
         'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS'
-    });
+    }, extraHeaders || {}));
     res.end(body);
+}
+
+/** 对外公开地址（OIDC redirect_uri 用）：尊重 X-Forwarded-*，可被 oidcRedirectUri 配置覆盖 */
+function publicBaseUrl(req) {
+    const proto = String(req.headers['x-forwarded-proto'] || (req.socket && req.socket.encrypted ? 'https' : 'http')).split(',')[0].trim() || 'http';
+    const host = String(req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+    return `${proto}://${host}`;
+}
+
+function parseCookies(req) {
+    const out = {};
+    for (const part of String(req.headers.cookie || '').split(';')) {
+        const i = part.indexOf('=');
+        if (i < 0) continue;
+        out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    }
+    return out;
 }
 
 function readBody(req, limit = 1024 * 1024) {
@@ -117,7 +135,7 @@ function probeConnection(rawUrl, timeoutMs = 5000) {
  * 所有 /api/* 均需 X-API-Key 鉴权（避免公网骚扰）。
  */
 function createHandler(ctx) {
-    const { config, store, keys, queue, logger, downloader, state, janitor } = ctx;
+    const { config, store, keys, queue, logger, downloader, state, janitor, auth } = ctx;
 
     /** 历史下载记录：云端清单 ∪ 服务端已完成任务，尽量补全标题 */
     function historyData() {
@@ -152,20 +170,111 @@ function createHandler(ctx) {
             return;
         }
 
+        // ---- OIDC 登录（公开，无需鉴权）----
+        if (pathname === '/auth/oidc/login' && method === 'GET') {
+            if (!auth || !auth.isOidcEnabled()) {
+                res.writeHead(302, { Location: '/?login=local&error=' + encodeURIComponent('未配置 OIDC 登录') });
+                res.end();
+                return;
+            }
+            try {
+                const { url } = await auth.beginOidcLogin(publicBaseUrl(req));
+                res.writeHead(302, { Location: url });
+                res.end();
+            } catch (e) {
+                logger.warn(`OIDC 登录发起失败: ${e.message}`);
+                res.writeHead(302, { Location: '/?login=local&error=' + encodeURIComponent(e.message) });
+                res.end();
+            }
+            return;
+        }
+        if (pathname === '/auth/oidc/callback' && method === 'GET') {
+            if (!auth) { res.writeHead(404); res.end('Not Found'); return; }
+            try {
+                const { user } = await auth.completeOidcLogin(query, publicBaseUrl(req));
+                const { token } = auth.createSession(user, 'oidc');
+                logger.info(`OIDC 登录成功: ${user.username}`);
+                res.writeHead(302, {
+                    'Set-Cookie': auth.sessionCookie(token, req),
+                    Location: '/'
+                });
+                res.end();
+            } catch (e) {
+                logger.warn(`OIDC 登录失败: ${e.message}`);
+                res.writeHead(302, { Location: '/?login=local&error=' + encodeURIComponent(e.message) });
+                res.end();
+            }
+            return;
+        }
+
         if (!pathname.startsWith('/api/')) {
             serveStatic(res, pathname);
             return;
         }
 
-        // ---- 鉴权 ----
+        // ---- 鉴权：API Key（程序化调用）或登录会话（Web 控制台）----
+        const session = auth ? auth.sessionFromRequest(req) : null;
         const rawKey = extractApiKey(req, query);
         const keyInfo = rawKey ? keys.verify(rawKey) : null;
-        if (!keyInfo) {
-            sendJson(res, 401, { ok: false, error: '未授权：请提供有效的 API Key（请求头 X-API-Key 或 Authorization: Bearer）' });
+        // 登录相关接口公开；其余 /api/* 需要 API Key 或有效会话
+        const isPublicAuth = pathname === '/api/auth/config' || pathname === '/api/auth/login' || pathname === '/api/auth/logout';
+        if (!isPublicAuth && !keyInfo && !session) {
+            sendJson(res, 401, { ok: false, error: '未授权：请登录（账号密码 / SSO），或提供有效 API Key（请求头 X-API-Key 或 Authorization: Bearer）' });
             return;
         }
 
         try {
+            // ---- 登录鉴权接口 ----
+            if (pathname === '/api/auth/config' && method === 'GET') {
+                sendJson(res, 200, {
+                    ok: true,
+                    oidc: auth ? auth.isOidcEnabled() : false,
+                    passwordLogin: true
+                });
+                return;
+            }
+            if (pathname === '/api/auth/login' && method === 'POST') {
+                if (!auth) { sendJson(res, 503, { ok: false, error: '服务未启用登录模块' }); return; }
+                const body = await readBody(req);
+                const user = auth.verifyPassword(body.username, body.password);
+                if (!user) {
+                    logger.warn(`登录失败: 用户名 ${String(body.username || '').slice(0, 40)}`);
+                    sendJson(res, 401, { ok: false, error: '用户名或密码错误' });
+                    return;
+                }
+                const { token } = auth.createSession(user, 'password');
+                logger.info(`登录成功: ${user.username}（账号密码）`);
+                sendJson(res, 200, { ok: true, user: { username: user.username } }, { 'Set-Cookie': auth.sessionCookie(token, req) });
+                return;
+            }
+            if (pathname === '/api/auth/me' && method === 'GET') {
+                sendJson(res, 200, {
+                    ok: true,
+                    user: session ? { username: session.username, via: session.via } : null,
+                    keyName: keyInfo ? keyInfo.name : null
+                });
+                return;
+            }
+            if (pathname === '/api/auth/logout' && method === 'POST') {
+                if (auth) {
+                    const token = parseCookies(req)[SESSION_COOKIE];
+                    auth.destroySession(token);
+                }
+                sendJson(res, 200, { ok: true }, auth ? { 'Set-Cookie': auth.clearSessionCookie(req) } : undefined);
+                return;
+            }
+            if (pathname === '/api/auth/password' && method === 'POST') {
+                if (!auth || !session) { sendJson(res, 401, { ok: false, error: '请先登录后再修改密码' }); return; }
+                const body = await readBody(req);
+                const user = auth.verifyPassword(session.username, body.currentPassword);
+                if (!user) { sendJson(res, 401, { ok: false, error: '当前密码错误' }); return; }
+                const r = auth.setPassword(user.id, body.newPassword);
+                if (!r.ok) { sendJson(res, 400, { ok: false, error: r.error }); return; }
+                logger.info(`登录密码已修改: ${user.username}`);
+                sendJson(res, 200, { ok: true });
+                return;
+            }
+
             if (pathname === '/api/stats' && method === 'GET') {
                 sendJson(res, 200, {
                     ok: true,
@@ -177,7 +286,7 @@ function createHandler(ctx) {
                     cookieSet: !!config.get('nhCookie'),
                     pendingCleanups: janitor ? janitor.pending() : 0,
                     downloadDir: config.get('downloadDir'),
-                    keyName: keyInfo.name
+                    keyName: keyInfo ? keyInfo.name : (session ? session.username : '-')
                 });
                 return;
             }

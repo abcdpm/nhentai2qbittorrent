@@ -171,6 +171,8 @@ code {
 .task-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
 .task-title { font-weight: 700; font-size: 14.5px; line-height: 1.45; word-break: break-all; }
 .task-meta { margin-top: 5px; display: flex; gap: 12px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); }
+.task-meta .gid-link { color: var(--accent-2); text-decoration: none; }
+.task-meta .gid-link:hover { text-decoration: underline; }
 .task-actions { display: flex; gap: 8px; flex-shrink: 0; }
 .badge {
     display: inline-flex; align-items: center; gap: 5px; padding: 4px 11px; border-radius: 999px;

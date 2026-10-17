@@ -34,6 +34,13 @@ const DEFAULTS = {
     nhApiKey: '',               // nhentai API Key（可选，仅 apiUrlTemplate 启用时使用）
     nhCookie: '',               // 浏览器 Cookie（油猴脚本会自动同步；HTML 源使用）
     preferCoverHost: true,      // 优先用封面所在 CDN 节点
+    // 登录（Web 控制台）：OIDC 为主要登录入口，账号密码为备用登录
+    oidcIssuer: '',             // OIDC Issuer 地址（如 https://accounts.example.com）；配置后登录页以 SSO 为主入口
+    oidcClientId: '',           // OIDC Client ID（与 Issuer 同时配置即启用 SSO）
+    oidcClientSecret: '',       // OIDC Client Secret（机密客户端需要；公共客户端 + PKCE 可留空）
+    oidcScopes: 'openid profile email',
+    oidcRedirectUri: '',        // 回调地址（留空=自动推导；子路径反代部署时可显式指定）
+    sessionTtlDays: 30,         // 登录会话有效期（天）
     cdnBaseUrls: [
         'https://i.nhentai.net',
         'https://i1.nhentai.net',

@@ -102,7 +102,7 @@
         return data;
     }
 
-    /* ---------- 鉴权门 ---------- */
+    /* ---------- 登录门（SSO 主入口 / 账号密码备用）---------- */
     function showGate() {
         $('#gate').classList.remove('hidden');
         $('#app').classList.add('hidden');
@@ -113,18 +113,55 @@
         $('#app').classList.remove('hidden');
     }
 
-    async function tryEnter(key) {
-        state.apiKey = key.trim();
+    function forceLocalLogin() {
+        return /(^|[?&])login=local(&|$)/.test(location.search);
+    }
+
+    /** 登录门初始化：配置了 OIDC 后自动隐藏账号密码入口（手动访问 ?login=local 可进入备用登录） */
+    async function initGate() {
+        let oidc = false;
+        try {
+            const cfg = await api('/api/auth/config');
+            oidc = !!cfg.oidc;
+        } catch (e) { /* 拉取失败按备用登录显示 */ }
+        const forceLocal = forceLocalLogin();
+        $('#gate-sso').classList.toggle('hidden', !oidc);
+        $('#gate-local-wrap').classList.toggle('hidden', oidc && !forceLocal);
+        $('#gate-sub').textContent = oidc ? '使用单点登录（SSO）进入控制台' : '使用账号密码登录以进入控制台';
+        $('#gate-help').innerHTML = oidc
+            ? (forceLocal
+                ? '正在使用备用登录（账号密码）。首次使用？密码在服务启动日志或 <code>server/data/INITIAL_PASSWORD.txt</code>'
+                : '账号密码为备用登录，入口已隐藏；如 SSO 不可用，可手动在地址后添加 <code>?login=local</code> 进入备用登录')
+            : '首次使用？账号密码在服务启动日志中打印，或查看 <code>server/data/INITIAL_PASSWORD.txt</code>；API / 油猴脚本调用仍使用 <code>X-API-Key</code>';
+        const err = new URLSearchParams(location.search).get('error');
+        if (err) $('#gate-error').textContent = err;
+    }
+
+    async function loginWithPassword() {
+        const username = $('#gate-user').value.trim();
+        const password = $('#gate-pass').value;
+        if (!username || !password) { $('#gate-error').textContent = '请输入用户名和密码'; return; }
+        try {
+            await api('/api/auth/login', { method: 'POST', body: { username, password } });
+            $('#gate-error').textContent = '';
+            $('#gate-pass').value = '';
+            await enterApp();
+        } catch (e) {
+            $('#gate-error').textContent = e.auth ? '用户名或密码错误' : ('登录失败：' + e.message);
+        }
+    }
+
+    async function enterApp() {
         try {
             const s = await api('/api/stats');
-            localStorage.setItem('nhServerKey', state.apiKey);
             state.connected = true;
-            $('#gate-error').textContent = '';
             showApp();
             $('#ver-text').textContent = s.version || '1.0.0';
             refreshAll();
         } catch (e) {
-            $('#gate-error').textContent = e.auth ? 'API Key 无效，请检查后重试' : ('连接失败：' + e.message);
+            if (e.auth) { await initGate(); showGate(); return; }
+            $('#gate-error').textContent = '连接失败：' + e.message;
+            showGate();
         }
     }
 
@@ -195,7 +232,12 @@
             const barClass = t.status === 'completed' ? 'ok' : (t.status === 'failed' || t.status === 'completed_with_errors' ? 'err' : '');
             const actions = [];
             if (t.status === 'queued' || t.status === 'downloading') actions.push(`<button class="btn small danger" data-act="cancel" data-id="${t.id}">取消</button>`);
-            if (['failed', 'cancelled', 'completed_with_errors'].includes(t.status)) actions.push(`<button class="btn small" data-act="retry" data-id="${t.id}">重试</button>`);
+            if (['failed', 'cancelled', 'completed_with_errors'].includes(t.status)) {
+                // 快速跳转到该本的 nHentai 页面（元数据类失败的推荐恢复路径：打开页面由脚本自动补挂 meta/重新推送）
+                const isMetaErr = /元数据/.test(String(t.error || ''));
+                actions.push(`<button class="btn small ghost" data-act="open" data-gid="${esc(t.gid)}">${isMetaErr ? '🌐 去 nHentai 补元数据' : '🌐 nHentai 页面'}</button>`);
+                actions.push(`<button class="btn small" data-act="retry" data-id="${t.id}">重试</button>`);
+            }
             if (t.status !== 'downloading') actions.push(`<button class="btn small ghost" data-act="remove" data-id="${t.id}">删除</button>`);
 
             return `
@@ -204,7 +246,7 @@
                     <div style="min-width:0">
                         <div class="task-title">${esc(t.title)}</div>
                         <div class="task-meta">
-                            <span>GID: <code>${esc(t.gid)}</code></span>
+                            <span>GID: <a class="gid-link" href="https://nhentai.net/g/${esc(t.gid)}/" target="_blank" rel="noopener" title="打开 nHentai 页面"><code>${esc(t.gid)}</code> ↗</a></span>
                             <span>目录: <code>${esc(t.folder)}</code></span>
                             ${t.downloadedBytes ? `<span>已下载 ${formatBytes(t.downloadedBytes)}</span>` : ''}
                             ${t.convertedToWebp ? '<span>WebP ✓</span>' : ''}
@@ -282,7 +324,8 @@
     /* ---------- 设置 ---------- */
     const SETTINGS_FIELDS = ['downloadDir', 'requestIntervalMs', 'galleryIntervalMs', 'pageConcurrency',
         'timeoutMs', 'maxAttempts', 'retryDelayMs', 'repairRounds', 'webpQuality',
-        'metaUrlTemplate', 'apiUrlTemplate', 'nhCookie', 'userAgent', 'lrrUrl', 'lrrApiKey', 'lrrCategory'];
+        'metaUrlTemplate', 'apiUrlTemplate', 'nhCookie', 'userAgent', 'lrrUrl', 'lrrApiKey', 'lrrCategory',
+        'oidcIssuer', 'oidcClientId', 'oidcClientSecret', 'oidcScopes', 'oidcRedirectUri', 'sessionTtlDays'];
 
     async function loadSettings() {
         try {
@@ -473,14 +516,35 @@
 
     /* ---------- 事件绑定与启动 ---------- */
     function bind() {
-        $('#gate-submit').addEventListener('click', () => tryEnter($('#gate-key').value));
-        $('#gate-key').addEventListener('keydown', (e) => { if (e.key === 'Enter') tryEnter($('#gate-key').value); });
+        $('#gate-submit').addEventListener('click', loginWithPassword);
+        $('#gate-pass').addEventListener('keydown', (e) => { if (e.key === 'Enter') loginWithPassword(); });
+        $('#gate-sso').addEventListener('click', () => { window.location.href = API_BASE + 'auth/oidc/login'; });
 
-        $('#btn-logout').addEventListener('click', () => {
+        $('#btn-logout').addEventListener('click', async () => {
+            try { await api('/api/auth/logout', { method: 'POST' }); } catch (e) { /* 忽略 */ }
             localStorage.removeItem('nhServerKey');
             state.apiKey = '';
-            $('#gate-key').value = '';
+            $('#gate-user').value = '';
+            $('#gate-pass').value = '';
+            $('#gate-error').textContent = '';
+            await initGate();
             showGate();
+        });
+
+        $('#btn-change-pw').addEventListener('click', async () => {
+            const st = $('#pw-status');
+            const currentPassword = $('#pw-current').value;
+            const newPassword = $('#pw-new').value;
+            if (!currentPassword || !newPassword) { st.textContent = '✗ 请填写当前密码与新密码'; return; }
+            st.textContent = '🔐 提交中…';
+            try {
+                await api('/api/auth/password', { method: 'POST', body: { currentPassword, newPassword } });
+                st.textContent = '✓ 密码已修改';
+                $('#pw-current').value = '';
+                $('#pw-new').value = '';
+            } catch (e) {
+                st.textContent = '✗ ' + esc(e.message);
+            }
         });
 
         $$('.nav-item').forEach(b => b.addEventListener('click', () => switchView(b.dataset.view)));
@@ -520,7 +584,13 @@
 
         $('#task-list').addEventListener('click', (e) => {
             const btn = e.target.closest('button[data-act]');
-            if (btn) taskAction(btn.dataset.act, btn.dataset.id);
+            if (!btn) return;
+            if (btn.dataset.act === 'open') {
+                const gid = String(btn.dataset.gid || '').replace(/\D/g, '');
+                if (gid) window.open(`https://nhentai.net/g/${gid}/`, '_blank', 'noopener');
+                return;
+            }
+            taskAction(btn.dataset.act, btn.dataset.id);
         });
 
         $('#btn-pause').addEventListener('click', async () => {
@@ -596,6 +666,12 @@
     }
 
     bind();
-    if (state.apiKey) tryEnter(state.apiKey);
-    else showGate();
+    (async () => {
+        await initGate();
+        try {
+            const me = await api('/api/auth/me');
+            if (me && (me.user || me.keyName)) { await enterApp(); return; }
+        } catch (e) { /* 未登录 */ }
+        showGate();
+    })();
 })();
