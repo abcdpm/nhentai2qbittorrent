@@ -1,5 +1,5 @@
 'use strict';
-const { sleep, uuid, nowIso, galleryFolderName } = require('./util');
+const { sleep, uuid, nowIso, galleryFolderName, stripTags } = require('./util');
 
 const ACTIVE_STATUSES = ['queued', 'downloading'];
 
@@ -19,7 +19,13 @@ function sanitizeMeta(raw, gid) {
     const host = String(raw.coverHost == null ? '' : raw.coverHost).trim().replace(/\/+$/, '');
     if (/^https?:\/\/[a-z0-9.\-]+(:\d+)?$/i.test(host)) coverHost = host;
 
-    return { gid: String(gid || raw.gid || ''), mediaId, numPages, extMap, coverHost };
+    return { gid: String(gid || raw.gid || ''), mediaId, numPages, extMap, coverHost, title: sanitizeTitle(raw.title) };
+}
+
+/** 提取推送附带的标题（raw.title 或 meta.title），清洗后与 gid 相同/为空则返回 '' 交由调用方兜底 */
+function sanitizeTitle(v) {
+    const t = stripTags(String(v == null ? '' : v)).replace(/\s+/g, ' ').trim().slice(0, 300);
+    return t;
 }
 
 /**
@@ -82,7 +88,11 @@ class QueueManager {
                 continue;
             }
 
-            const title = String(raw.title || '').trim() || gid;
+            // 标题优先级：推送标题 > 元数据标题 > gid 兜底。
+            // 与 gid 相同的占位标题视为无效（DOM 提取失败时前端会回退成 gid），改用元数据标题。
+            const t1 = sanitizeTitle(raw.title);
+            const t2 = sanitizeTitle(raw.meta && raw.meta.title);
+            const title = (t1 && t1 !== gid ? t1 : (t2 && t2 !== gid ? t2 : gid));
             // 失败/取消的任务直接复活重新入队
             const revivable = all.find(t => t.status === 'failed' || t.status === 'cancelled');
             if (revivable) {

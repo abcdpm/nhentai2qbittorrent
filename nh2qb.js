@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nHentai → Local Image Scraper
 // @namespace    http://tampermonkey.net/
-// @version      5.7.0
+// @version      5.8.0
 // @description  直接提取高清原图下载；「推送到下载服务」自动附带元数据（media_id/Pages数），服务端纯CDN下载避开官方API限流；完整性校验/超时重传/多CDN轮询/WebP统一/自动压缩zip；下载完成自动标记已下载；文件夹格式：本子名 [本子id]
 // @author       Paccu
 // @match        https://nhentai.net/g/*
@@ -84,30 +84,39 @@
     let savedChecked = {};
     let downloadedSet = new Set();
     let downloadingSet = new Set();
+    /** 同步对账判定「已非下载中」的 gid（写入 localStorage 时剔除，防止旧快照复活黄标） */
+    let pendingRemove = new Set();
     let globalFailedItems = [];
 
+    function readLocalGidSet(key) {
+        try {
+            const arr = JSON.parse(localStorage.getItem(key) || '[]');
+            return Array.isArray(arr) ? new Set(arr.map(String)) : new Set();
+        } catch (e) { return new Set(); }
+    }
+
+    /**
+     * 从 localStorage 刷新内存状态（并集合并，只增不减）：
+     * 多页签场景下任何一个页签用旧快照覆写 localStorage，都不会让本页的角标数据缩水。
+     * 「下载中」的移除只由两条路径驱动：① gid 变为已下载；② 服务端同步对账（pendingRemove）。
+     */
     function syncLocalState() {
         try { savedChecked = JSON.parse(localStorage.getItem(CHECK_KEY) || '{}'); } catch(e) { savedChecked = {}; }
-        try {
-            const stored = JSON.parse(localStorage.getItem(DOWNLOADED_KEY) || '[]');
-            if (Array.isArray(stored)) {
-                downloadedSet = new Set(stored.map(String));
-            }
-        } catch (e) {}
-        try {
-            const dl = JSON.parse(localStorage.getItem(DOWNLOADING_KEY) || '[]');
-            downloadingSet = Array.isArray(dl) ? new Set(dl.map(String)) : new Set();
-        } catch (e) { downloadingSet = new Set(); }
-        // 已完成的从「下载中」清理
+        // 已下载：并集（历史事实不回退）
+        const storedDownloaded = readLocalGidSet(DOWNLOADED_KEY);
+        downloadedSet = new Set([...storedDownloaded, ...downloadedSet]);
+        // 下载中：并集 − 已下载 − 待移除
+        const storedDownloading = readLocalGidSet(DOWNLOADING_KEY);
+        downloadingSet = new Set([...storedDownloading, ...downloadingSet]);
         for (const gid of [...downloadingSet]) {
-            if (downloadedSet.has(gid)) downloadingSet.delete(gid);
+            if (downloadedSet.has(gid) || pendingRemove.has(gid)) downloadingSet.delete(gid);
         }
         // 注意：此处不再"剪枝"勾选状态——勾选只在用户操作/本子刚变为已下载时变更，
         // 避免每次渲染把已下载清单里的勾选删掉（表现为勾选莫名消失）。
     }
 
     window.addEventListener('storage', (e) => {
-        if (e.key === DOWNLOADED_KEY || e.key === CHECK_KEY) {
+        if (e.key === DOWNLOADED_KEY || e.key === CHECK_KEY || e.key === DOWNLOADING_KEY) {
             syncLocalState();
             requestRender();
         }
@@ -160,6 +169,37 @@
     }
 
     function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":"&#39;"})[c]); }
+    /** 解码 HTML 实体（标题里常见 &amp; &#x27; 等） */
+    function decodeEntities(s) {
+        return String(s == null ? '' : s)
+            .replace(/&(amp|lt|gt|quot|#39|#x27|nbsp);/gi, (m) => ({
+                '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'", '&#x27;': "'", '&nbsp;': ' '
+            }[m.toLowerCase()] || m))
+            .replace(/&#(\d+);/g, (m, d) => String.fromCodePoint(parseInt(d, 10)))
+            .replace(/&#x([0-9a-f]+);/gi, (m, h) => String.fromCodePoint(parseInt(h, 16)));
+    }
+    /**
+     * 详情页标题提取（多级回退，任一非空即用）：
+     * .pretty-format → h2/h1.title → og:title → document.title。
+     * 用 textContent（innerText 对隐藏元素返回空串，是标题丢失、zip 被命名成 "gid [gid]" 的根源）。
+     */
+    function extractPageTitle() {
+        const pick = (sel) => {
+            const el = document.querySelector(sel);
+            if (!el) return '';
+            return decodeEntities(el.textContent || '').replace(/\s+/g, ' ').trim();
+        };
+        const fromMeta = () => {
+            const el = document.querySelector('meta[property="og:title"]');
+            return el ? decodeEntities(el.getAttribute('content') || '').replace(/\s+/g, ' ').trim() : '';
+        };
+        return pick('#info h2 .pretty-format') || pick('#info h2.title') || pick('#info h2')
+            || pick('#info h1 .pretty-format') || pick('#info h1.title') || pick('#info h1')
+            || pick('h2.title') || pick('h1.title')
+            || fromMeta().replace(/\s*\|?\s*nhentai.*$/i, '').trim()
+            || (document.title || '').replace(/\s*[-|]\s*nhentai.*$/i, '').trim()
+            || '';
+    }
     const WINDOWS_RESERVED = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/i;
     function utf8Len(s) { let n = 0; for (const ch of String(s)) { const c = ch.codePointAt(0); n += c < 0x80 ? 1 : c < 0x800 ? 2 : c < 0x10000 ? 3 : 4; } return n; }
     function truncateUtf8(str, maxBytes) {
@@ -214,6 +254,7 @@
             try {
                 const m = await fetchGalleryMeta(gid, htmlString);
                 return {
+                    title: m.title || null,
                     mediaId: m.mediaId,
                     numPages: m.numPages,
                     extMap: m.extMap || [],
@@ -244,6 +285,12 @@
             stickyNotify('nh-push-progress', `<div class='title'>正在解析元数据 (${i + 1}/${items.length})...</div>`);
             it.meta = await fetchMetaForPush(it.gid);
             if (i < items.length - 1) await new Promise(r => setTimeout(r, 350));
+        }
+        // DOM 标题提取失败回退成 gid 的场景：用元数据标题回填（服务端仍会二次兜底）
+        for (const it of items) {
+            if ((!it.title || String(it.title) === String(it.gid)) && it.meta && it.meta.title) {
+                it.title = it.meta.title;
+            }
         }
         const metaOk = items.filter(it => it.meta).length;
 
@@ -282,6 +329,37 @@
      * 并对你推送过的任务弹「下载完成」提示。
      */
     /**
+     * 「已下载最大 GID / 上次下载最大 GID」显示（右下角面板）：
+     * 本地下载与下载服务完成 都会调用 recordDownloadedGid 更新。
+     */
+    const HISTORY_KEY = 'nh_qb_push_history_v2';
+    const getBjTime = () => new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
+
+    function renderGidInfo(data) {
+        const linkStyle = 'color:#ed2553;font-weight:bold;font-size:14px;margin:0 4px;text-decoration:none;border-bottom:1px dashed #ed2553;';
+        const timeStyle = 'color:#888;font-size:11px;font-family:monospace;min-width:110px;text-align:right;display:inline-block;';
+        const rowStyle = 'display:flex;align-items:center;justify-content:flex-end;width:100%;margin-bottom:2px;';
+        return `<div style="${rowStyle}"><span>已下载最大 GID:</span><a href="/g/${data.max.id}/" target="_blank" style="${linkStyle}">${data.max.id}</a><span style="${timeStyle}">[${data.max.time}]</span></div>` +
+               `<div style="${rowStyle}"><span style="color:#aaa;">上次下载最大 GID:</span><a href="/g/${data.prev.id}/" target="_blank" style="${linkStyle}">${data.prev.id}</a><span style="${timeStyle}">[${data.prev.time}]</span></div>`;
+    }
+
+    function recordDownloadedGid(gid, timeStr) {
+        const id = parseInt(gid, 10);
+        if (!Number.isFinite(id) || id <= 0) return;
+        let hist;
+        try { hist = JSON.parse(localStorage.getItem(HISTORY_KEY) || ''); } catch (e) { hist = null; }
+        if (!hist || !hist.max) hist = { max: { id: 0, time: '--' }, prev: { id: 0, time: '--' } };
+        if (id > (parseInt(hist.max.id, 10) || 0)) {
+            hist.prev = { id: hist.max.id || 0, time: hist.max.time || '--' };
+            hist.max = { id, time: timeStr || getBjTime() };
+            localStorage.setItem(HISTORY_KEY, JSON.stringify(hist));
+            localStorage.setItem('nh_qb_pushed_max_gid', String(id));   // 兼容旧键
+            const el = document.getElementById('nh-max-gid-display');
+            if (el) el.innerHTML = renderGidInfo(hist);
+        }
+    }
+
+    /**
      * 轻量同步（每 12s + 页面加载 + 标签页激活）：服务端下载状态 → 前端标记。
      * - 已下载数据及时同步（黄色「下载中」→ 绿色「已下载」）
      * - 本子【刚变为已下载】的这一刻才自动取消勾选——不做持续剪枝，勾选不再莫名消失
@@ -298,6 +376,7 @@
         const justDone = [];
 
         // ① 已下载清单（服务端全部完成任务 ∪ 云端清单）
+        let newMaxGid = 0, newMaxTime = '';
         for (const gid of (d.downloadedGids || []).map(String)) {
             if (downloadingSet.has(gid)) { downloadingSet.delete(gid); changed = true; }
             if (downloadedSet.has(gid)) continue;
@@ -318,15 +397,33 @@
             const isRecent = finishedAt && (Date.now() - finishedAt) < 15 * 60 * 1000;
             if (recent && (isMine || isRecent)) justDone.push(recent);
             if (pushedMap[gid]) delete pushedMap[gid];
-        }
 
-        // ② 「下载中」黄色角标（快照替换）
+            // 更新「已下载最大 GID」显示（取本批最大值，时间用服务端完成时间）
+            const num = parseInt(gid, 10);
+            if (Number.isFinite(num) && num > newMaxGid) {
+                newMaxGid = num;
+                newMaxTime = finishedAt
+                    ? new Date(finishedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false })
+                    : '';
+            }
+        }
+        if (newMaxGid) recordDownloadedGid(newMaxGid, newMaxTime);
+
+        // ② 「下载中」黄色角标（服务端权威快照：云端标记 ∪ 活动任务）
         const active = new Set((d.downloadingGids || []).map(String));
         for (const gid of active) {
-            if (!downloadingSet.has(gid)) { downloadingSet.add(gid); changed = true; }
+            if (!downloadingSet.has(gid) && !downloadedSet.has(gid)) { downloadingSet.add(gid); changed = true; }
         }
         for (const gid of [...downloadingSet]) {
-            if (!active.has(gid) && !downloadedSet.has(gid)) { downloadingSet.delete(gid); changed = true; }
+            if (!active.has(gid) && !downloadedSet.has(gid)) {
+                // 最近 5 分钟内刚推送的标记不删：任务可能还没进入服务端视野
+                // （同步请求先于入队请求到达服务端的瞬时竞态），交给下一轮对账
+                const pushedTs = Number(pushedMap[gid]) || 0;
+                if (pushedTs && Date.now() - pushedTs < 5 * 60 * 1000) continue;
+                downloadingSet.delete(gid);
+                pendingRemove.add(gid);   // 同步剔除持久化，防其他页签旧快照复活
+                changed = true;
+            }
         }
 
         if (changed || checkedChanged) {
@@ -364,8 +461,19 @@
     }
 
     function persistLocalState() {
-        localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...downloadedSet]));
-        localStorage.setItem(DOWNLOADING_KEY, JSON.stringify([...downloadingSet]));
+        // 写入前与 localStorage 现值做并集：任何一个页签的旧快照都不会把共享清单写少
+        const mergedDownloaded = new Set([...readLocalGidSet(DOWNLOADED_KEY), ...downloadedSet]);
+        downloadedSet = mergedDownloaded;
+        localStorage.setItem(DOWNLOADED_KEY, JSON.stringify([...mergedDownloaded]));
+
+        const mergedDownloading = new Set([...readLocalGidSet(DOWNLOADING_KEY), ...downloadingSet]);
+        for (const gid of [...mergedDownloading]) {
+            if (mergedDownloaded.has(gid) || pendingRemove.has(gid)) mergedDownloading.delete(gid);
+        }
+        pendingRemove.clear();
+        downloadingSet = mergedDownloading;
+        localStorage.setItem(DOWNLOADING_KEY, JSON.stringify([...mergedDownloading]));
+
         localStorage.setItem('nh_pushed_gids', JSON.stringify(readPushedMap()));
         scheduleStateUpload();
     }
@@ -447,6 +555,19 @@
         let mediaIdMatch = html.match(/"media_id":\s*"?(\d+)"?/) || html.match(/\/galleries\/(\d+)\//);
         if (mediaIdMatch) mediaId = mediaIdMatch[1];
 
+        // 标题提取（DOM 提取失败时的兜底来源，随 meta 上传给服务端）
+        let title = null;
+        const ogTitle = html.match(/<meta[^>]+property="og:title"[^>]+content="([^"]*)"/);
+        if (ogTitle) title = decodeEntities(ogTitle[1]).replace(/\s*\|?\s*nhentai.*$/i, '').replace(/\s+/g, ' ').trim();
+        if (!title) {
+            const h = html.match(/<h[12][^>]*class="[^"]*title[^"]*"[^>]*>([\s\S]*?)<\/h[12]>/);
+            if (h) title = decodeEntities(h[1].replace(/<[^>]*>/g, '')).replace(/\s+/g, ' ').trim();
+        }
+        if (!title) {
+            const t = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+            if (t) title = decodeEntities(t[1]).replace(/\s*[-|]\s*nhentai.*$/i, '').replace(/\s+/g, ' ').trim();
+        }
+
         let numPagesMatch = html.match(/"num_pages":\s*(\d+)/);
         if (numPagesMatch) numPages = parseInt(numPagesMatch[1], 10);
         if (!numPages) {
@@ -475,7 +596,7 @@
             throw new Error(`元数据提取失败 (未能从页面匹配到媒体 ID 或页数)`);
         }
 
-        return { mediaId, numPages, imgHost, extMap };
+        return { mediaId, numPages, imgHost, extMap, title: title || null };
     }
 
     // ★核心机制变更：使用浏览器原生 Image 对象加载探测，彻底告别油猴跨域弹窗
@@ -624,7 +745,7 @@
         }
         panel.appendChild(setBtn);
         pushBtn.addEventListener('click', async () => {
-            const title = document.querySelector('#info h2')?.innerText?.trim() || document.querySelector('#info h1')?.innerText?.trim() || currentGid;
+            const title = extractPageTitle() || currentGid;
             // 当前详情页直接解析元数据随任务上传（服务端纯 CDN 下载）
             const meta = await fetchMetaForPush(String(currentGid), document.documentElement.innerHTML);
             const result = await pushItemsToServer([{ gid: String(currentGid), title, meta }]);
@@ -640,7 +761,7 @@
 
         btn.addEventListener('click', async () => {
             const gid = String(location.pathname.split('/')[2]);
-            const title = document.querySelector('#info h2')?.innerText?.trim() || document.querySelector('#info h1')?.innerText?.trim() || gid;
+            const title = extractPageTitle() || gid;
             
             let meta;
             try { meta = await fetchGalleryMeta(gid, document.documentElement.innerHTML); } 
@@ -755,28 +876,8 @@
 
     function handleBatchResult(successList, failedList, total) {
         if (successList.length > 0) {
-            const HISTORY_KEY = 'nh_qb_push_history_v2';
-            const OLD_KEY = 'nh_qb_pushed_max_gid';
-            const getBjTime = () => new Date().toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai', hour12: false });
-            let pushHistory = JSON.parse(localStorage.getItem(HISTORY_KEY) || '{"max":{"id":0,"time":"--"},"prev":{"id":0,"time":"--"}}');
-            
-            const currentBatchGids = successList.map(r => parseInt(r.gid));
-            const currentBatchMax = Math.max(...currentBatchGids);
-            if (currentBatchMax > pushHistory.max.id) {
-                pushHistory.prev.id = pushHistory.max.id; pushHistory.prev.time = pushHistory.max.time;
-                pushHistory.max.id = currentBatchMax; pushHistory.max.time = getBjTime();
-                localStorage.setItem(HISTORY_KEY, JSON.stringify(pushHistory)); localStorage.setItem(OLD_KEY, currentBatchMax);
-                
-                const renderGidInfo = (data) => {
-                    const linkStyle = 'color:#ed2553;font-weight:bold;font-size:14px;margin:0 4px;text-decoration:none;border-bottom:1px dashed #ed2553;';
-                    const timeStyle = 'color:#888;font-size:11px;font-family:monospace;min-width:110px;text-align:right;display:inline-block;';
-                    const rowStyle = 'display:flex;align-items:center;justify-content:flex-end;width:100%;margin-bottom:2px;';
-                    return `<div style="${rowStyle}"><span>已下载最大 GID:</span><a href="/g/${data.max.id}/" target="_blank" style="${linkStyle}">${data.max.id}</a><span style="${timeStyle}">[${data.max.time}]</span></div>` +
-                           `<div style="${rowStyle}"><span style="color:#aaa;">上次下载最大 GID:</span><a href="/g/${data.prev.id}/" target="_blank" style="${linkStyle}">${data.prev.id}</a><span style="${timeStyle}">[${data.prev.time}]</span></div>`;
-                };
-                const infoEl = document.getElementById('nh-max-gid-display');
-                if(infoEl) infoEl.innerHTML = renderGidInfo(pushHistory);
-            }
+            // 本地下载完成 → 更新「已下载最大 GID」显示
+            recordDownloadedGid(Math.max(...successList.map(r => parseInt(r.gid, 10) || 0)));
         }
 
         globalFailedItems = failedList;
@@ -982,7 +1083,8 @@
             thumb.querySelectorAll('.nh-custom-injected').forEach(el => el.remove());
             thumb.setAttribute('data-nh-gid', gid);
 
-            const title = (thumb.querySelector('.caption')?.innerText || gid).trim();
+            const capEl = thumb.querySelector('.caption');
+            const title = decodeEntities((capEl && (capEl.textContent || capEl.innerText)) || '').replace(/\s+/g, ' ').trim() || gid;
             thumb.style.position = 'relative';
 
             const isChinese = thumb.classList.contains('lang-cn') || title.includes('[Chinese]') || title.includes('汉化');
@@ -1096,8 +1198,11 @@
             // ① 已下载清单（并集；服务端已含所有已完成任务）
             for (const gid of (s.downloadedGids || [])) downloadedSet.add(String(gid));
             // ② 勾选状态仅存浏览器本地，云端同步不覆盖（避免后台刷新丢失勾选）
-            // ③ 下载中标记
-            downloadingSet = new Set((s.downloadingGids || []).map(String));
+            // ③ 下载中标记（并集：云端 + 本地，减已下载）
+            downloadingSet = new Set([...downloadingSet, ...(s.downloadingGids || []).map(String)]);
+            for (const gid of [...downloadingSet]) {
+                if (downloadedSet.has(gid)) downloadingSet.delete(gid);
+            }
             // ④ 推送清单
             localStorage.setItem('nh_pushed_gids', JSON.stringify(s.pushedGids || {}));
 

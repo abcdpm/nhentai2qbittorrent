@@ -352,7 +352,8 @@ function createHandler(ctx) {
             if (pathname === '/api/sync' && method === 'GET') {
                 const s = state.get();
                 const set = new Set(s.downloadedGids);
-                const downloading = new Set();
+                const active = new Set();      // 排队中/下载中的任务
+                const terminal = new Set();    // 失败/取消/部分失败的终态任务（黄标应消失）
                 const failed = [];
                 const recentDone = [];
                 const now = Date.now();
@@ -365,11 +366,25 @@ function createHandler(ctx) {
                             recentDone.push({ gid, title: t.title, finishedAt: t.finishedAt });
                         }
                     } else if (t.status === 'queued' || t.status === 'downloading') {
-                        downloading.add(gid);
-                    } else if (t.status === 'failed' || t.status === 'completed_with_errors') {
-                        failed.push({ gid, title: t.title, error: t.error });
+                        active.add(gid);
+                    } else {
+                        terminal.add(gid);
+                        if (t.status === 'failed' || t.status === 'completed_with_errors') {
+                            failed.push({ gid, title: t.title, error: t.error });
+                        }
                     }
                 }
+                // 「下载中」权威对账：(云端标记 ∪ 活动任务) − 已下载 − 终态任务。
+                // 云端标记（浏览器推送后打的黄标）不再被丢弃；无任务的标记按推送时间 24h 过期
+                // （覆盖任务被删除/清空后的残留），对账结果写回 state.json 作为唯一事实源。
+                const downloading = new Set();
+                for (const gid of [...s.downloadingGids, ...active]) {
+                    if (set.has(gid) || terminal.has(gid)) continue;
+                    if (active.has(gid)) { downloading.add(gid); continue; }
+                    const ts = Number(s.pushedGids[gid]) || 0;
+                    if (ts && now - ts < 24 * 3600 * 1000) downloading.add(gid);
+                }
+                state.setDownloading([...downloading]);
                 sendJson(res, 200, {
                     ok: true,
                     downloadedGids: [...set],

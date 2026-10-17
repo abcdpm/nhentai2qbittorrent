@@ -1014,6 +1014,99 @@ test('GET /api/sync：轻量同步接口（已下载/下载中/失败/最近完�
     }
 });
 
+test('「下载中」标记对账：云端标记保留 / 终态剪枝 / 24h TTL / 多客户端并集不互删', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    const keys = new KeyStore(env.tmp, env.logger);
+    const created = keys.create('测试密钥');
+    const state = new StateStore(env.tmp);
+    const handler = createHandler({
+        config: env.config, store: env.store, keys, queue: env.queue,
+        logger: env.logger, downloader: env.downloader, state
+    });
+    const server = http.createServer((req, res) => handler(req, res).catch(() => { res.writeHead(500); res.end(); }));
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const call = async (p, method, body) => {
+        const res = await fetch(base + p, {
+            method: method || 'GET',
+            headers: Object.assign({ 'X-API-Key': created.raw }, body ? { 'Content-Type': 'application/json' } : {}),
+            body: body ? JSON.stringify(body) : undefined
+        });
+        return { status: res.status, data: await res.json().catch(() => ({})) };
+    };
+    try {
+        const now = Date.now();
+        // 页签 A 打标 555；页签 B 随后上传不含 555 的旧快照——并集合并，不得互删（多页签互扰回归测试）
+        await call('/api/state', 'PUT', { state: { downloadingGids: ['555'], pushedGids: { '555': now } } });
+        let r = await call('/api/state', 'PUT', { state: { downloadingGids: ['666'], pushedGids: { '666': now } } });
+        assert.ok(r.data.state.downloadingGids.includes('555'), '其他页签的下载中标记不得被旧快照清掉');
+        assert.ok(r.data.state.downloadingGids.includes('666'));
+
+        // 任务：111 已完成 / 222 失败 / 333 排队中；777 无任务且推送已超 24h
+        env.store.add({ id: 'n1', gid: '111', status: 'completed', title: 'T1', folder: 'f', pages: [], createdAt: '2026-01-01T00:00:00Z', finishedAt: new Date().toISOString() });
+        env.store.add({ id: 'n2', gid: '222', status: 'failed', title: 'T2', folder: 'f', pages: [], createdAt: '2026-01-01T00:00:00Z', error: 'boom' });
+        env.store.add({ id: 'n3', gid: '333', status: 'queued', title: 'T3', folder: 'f', pages: [], createdAt: '2026-01-01T00:00:00Z' });
+        await call('/api/state', 'PUT', { state: {
+            downloadingGids: ['111', '222', '333', '777'],
+            pushedGids: { '111': now, '222': now, '777': now - 25 * 3600 * 1000 }
+        } });
+
+        r = await call('/api/sync');
+        const d = r.data;
+        assert.ok(d.downloadedGids.includes('111'), '已完成应在已下载清单');
+        assert.ok(d.downloadingGids.includes('555') && d.downloadingGids.includes('666'), '云端「下载中」标记（无活动任务）不应被丢弃');
+        assert.ok(d.downloadingGids.includes('333'), '活动任务应在下载中');
+        assert.ok(!d.downloadingGids.includes('111'), '已完成不显示下载中');
+        assert.ok(!d.downloadingGids.includes('222'), '失败任务的黄标应剪枝');
+        assert.ok(!d.downloadingGids.includes('777'), '无任务且推送超 24h 的残留标记应过期');
+
+        // 对账结果写回 state.json（唯一事实源）
+        r = await call('/api/state', 'GET');
+        assert.ok(!r.data.state.downloadingGids.includes('777'), '过期标记应从云端剪除');
+        assert.ok(r.data.state.downloadingGids.includes('555'), '有效标记应保留在云端');
+    } finally {
+        server.close();
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('标题兜底与自愈：meta.title 替代 gid 占位标题；下载启动时修正标题并重算文件夹', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    try {
+        // ① 入队：title 是 gid 占位（DOM 提取失败回退）→ 用 meta.title
+        let r = env.queue.enqueue([{
+            gid: '123001', title: '123001',
+            meta: { title: '[作者A] 测试本子标题', mediaId: '900001', numPages: 3, extMap: ['jpg', 'png', 'webp'], coverHost: null }
+        }]);
+        assert.strictEqual(r.added[0].title, '[作者A] 测试本子标题', 'gid 占位标题应被 meta.title 替代');
+        assert.strictEqual(r.added[0].folder, '[作者A] 测试本子标题 [123001]');
+
+        // ② 无任何标题 → gid 兜底（向后兼容）
+        r = env.queue.enqueue([{ gid: '123002', title: '' }]);
+        assert.strictEqual(r.added[0].title, '123002', '无标题时用 gid 兜底');
+
+        // ③ 下载自愈：title=gid 且不带 meta → 服务端抓元数据后修正标题并重算文件夹
+        const { added } = env.queue.enqueue([{ gid: '123003', title: '123003' }]);
+        env.queue.start();
+        const task = await waitFor(() => {
+            const t = env.store.get(added[0].id);
+            return t && ['completed', 'completed_with_errors', 'failed'].includes(t.status) ? t : null;
+        }, 15000, '任务完成');
+
+        assert.strictEqual(task.status, 'completed');
+        assert.strictEqual(task.title, '[作者C] 完整性补齐', '下载启动时应自愈标题（原为 gid 占位）');
+        assert.strictEqual(task.folder, '[作者C] 完整性补齐 [123003]', '文件夹名应按修正后的标题重算');
+        const dir = path.join(env.config.get('downloadDir'), '[作者C] 完整性补齐 [123003]');
+        assert.deepStrictEqual(filesOf(dir), ['1.jpg', '2.jpg', '3.png']);
+    } finally {
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
 test('压缩后自动上传 LANraragi（Bearer 认证 / 标题 / source 标签 / SHA1）', async () => {
     const mock = await createMockSite(GALLERY_1);
     const env = makeEnv(mock);

@@ -2,7 +2,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { sleep, parseRetryAfter, formatBytes, nowIso } = require('./util');
+const { sleep, parseRetryAfter, formatBytes, nowIso, galleryFolderName } = require('./util');
 const { fetchGalleryMeta } = require('./nhentai');
 const { createZipFromDir, readZipEntries } = require('./zip');
 
@@ -346,10 +346,17 @@ class Downloader {
         if (!task.meta) {
             const meta = await fetchGalleryMeta(task.gid, cfg, this.logger);
             task.meta = meta;
-            if (meta.title && (!task.title || task.title === task.gid)) task.title = meta.title;
             log(`元数据: media_id=${meta.mediaId}, ${meta.numPages} 页, 标题=${task.title}`);
         }
         const meta = task.meta;
+        // 标题自愈：推送时标题解析失败（title 回退成 gid）的场景在此修正，
+        // 并在尚无已下载页面时重算文件夹名（避免 zip 被命名成 "gid [gid].zip"；续传不打断）
+        if (meta.title && !/^gallery-/.test(meta.title) && (!task.title || task.title === task.gid)) {
+            task.title = meta.title;
+            const hasDone = (task.pages || []).some(p => p.status === 'done');
+            if (!hasDone) task.folder = galleryFolderName(task.title, task.gid);
+            log(`标题已修正: ${task.title}（文件夹: ${task.folder}）`);
+        }
         const numPages = meta.numPages;
         const dir = path.join(cfg.get('downloadDir'), task.folder);
         fs.mkdirSync(dir, { recursive: true });

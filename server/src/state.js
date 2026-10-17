@@ -6,7 +6,8 @@ const { readJson, atomicWriteJson, nowIso } = require('./util');
  * 前端状态云端持久化（data/state.json）——浏览器端 nh_qb_* 字段的主存储：
  *   downloadedGids  已下载清单（并集合并，历史事实不回退）
  *   checked         勾选状态 gid->title（快照替换，支持取消勾选同步）
- *   downloadingGids 下载中标记（快照替换）
+ *   downloadingGids 下载中标记（并集合并，防多页签旧快照互删；
+ *                   剪枝只由服务端 /api/sync 对账完成，见 setDownloading）
  *   pushedGids      推送清单 gid->时间戳（并集合并）
  */
 const DEFAULTS = { downloadedGids: [], checked: {}, downloadingGids: [], pushedGids: {} };
@@ -59,9 +60,21 @@ class StateStore {
             this.data.checked = next;   // 快照替换：取消勾选可同步
         }
         if (patch.downloadingGids !== undefined) {
-            this.data.downloadingGids = cleanGidList(patch.downloadingGids);
+            // 并集合并：多页签同时在线时，旧快照不再清掉其他页签打的「下载中」标记
+            this.data.downloadingGids = [...new Set([...this.data.downloadingGids, ...cleanGidList(patch.downloadingGids)])];
         }
 
+        this.persist();
+        return this.get();
+    }
+
+    /**
+     * 权威替换「下载中」标记（仅供服务端 /api/sync 对账使用）：
+     * 对账集合 = (云端标记 ∪ 活动任务) − 已下载 − 终态任务（失败/取消/部分失败），
+     * 由 api.js 计算后写回，使云端标记既不丢也不无限增长。
+     */
+    setDownloading(list) {
+        this.data.downloadingGids = cleanGidList(list);
         this.persist();
         return this.get();
     }

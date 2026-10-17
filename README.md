@@ -141,6 +141,13 @@ GET/PUT /api/settings                 GET/POST /api/keys     DELETE /api/keys/:i
 - 「推送到下载服务」按钮移至「批量下载到本地」右侧（顺序：批量下载到本地 | 推送到下载服务 | 设置）
 - **前端状态云端持久化**：`nh_qb_downloaded_gids` / `nh_qb_checked` / `nh_qb_downloading_gids` / `nh_pushed_gids` 以下载服务为主存储（`data/state.json`，新增 `GET/PUT /api/state`），浏览器变更自动上传；设置 →「🔄 从服务同步状态」手动拉回浏览器（换浏览器/清缓存可完整恢复）
 
+### v5.8.0
+- **修复：「下载中」黄标莫名丢失 / 多标签页互相干扰**——根因有二：
+  ① 多页签对 `nh_qb_downloading_gids`/`nh_qb_downloaded_gids` 的"旧快照整体覆写"竞态（storage 监听漏了下载中键 + 每次渲染从缓存整体重建集合）；现改为**并集合并读写（只增不减）**，移除只由「已下载」与服务端权威对账驱动，storage 监听补齐下载中键；
+  ② 服务端 `GET /api/sync` 的 `downloadingGids` 只含活动任务、丢弃云端标记，前端把它当权威快照导致黄标被删；现改为**权威对账**：`(云端标记 ∪ 活动任务) − 已下载 − 终态任务（失败/取消/部分失败）`，无任务的标记按推送时间 24h 过期，对账结果写回 `state.json`；`PUT /api/state` 的 `downloadingGids` 也改为并集合并（旧快照不再清掉其他页签的标记）
+- **修复：已下载数据在前端丢失**——`nh_qb_downloaded_gids` 的读写同样改并集合并，任何页签的旧快照都不会把清单写少
+- **修复：zip 被命名成 `gid [gid].zip`（标题丢失）**——标题提取改多级回退（`.pretty-format` → `h2/h1.title` → `og:title` → `document.title`，用 `textContent` 替代对隐藏元素返回空的 `innerText`）；推送元数据附带标题，服务端入队取「推送标题 > 元数据标题 > gid」（与 gid 相同的占位标题视为无效）；下载启动时对 `title=gid` 的任务自愈修正标题并重算文件夹名（无已下载页面时才重算，不打断续传）
+
 ### v5.6.0
 - 推送到下载服务时立即打**黄色「下载中」角标 + 封面变暗 + 取消勾选**；下载完成自动换成绿色「已下载」角标（失败/取消则恢复普通封面）；页面刷新后状态经服务端同步自动恢复
 - Docker 镜像支持 **`PUID`/`PGID`**（linuxserver.io 风格）：entrypoint 自动调整用户/组、修正数据卷归属并降权运行，默认 `PUID=1000 PGID=100`
