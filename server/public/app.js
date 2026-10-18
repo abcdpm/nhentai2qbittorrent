@@ -117,8 +117,8 @@
         return /(^|[?&])login=local(&|$)/.test(location.search);
     }
 
-    /** 登录门初始化：配置了 OIDC 后自动隐藏账号密码入口（手动访问 ?login=local 可进入备用登录） */
-    async function initGate() {
+    /** 登录门初始化：OIDC 启用后自动隐藏账号密码入口（备用登录入口不在页面暴露），打开首页自动跳转 SSO */
+    async function initGate(autoSso = true) {
         let oidc = false;
         try {
             const cfg = await api('/api/auth/config');
@@ -131,10 +131,15 @@
         $('#gate-help').innerHTML = oidc
             ? (forceLocal
                 ? '正在使用备用登录（账号密码）。首次使用？密码在服务启动日志或 <code>server/data/INITIAL_PASSWORD.txt</code>'
-                : '账号密码为备用登录，入口已隐藏；如 SSO 不可用，可手动在地址后添加 <code>?login=local</code> 进入备用登录')
+                : '已启用 SSO 单点登录；账号密码为备用登录（入口不在页面展示，仅供管理员在 SSO 不可用时使用）')
             : '首次使用？账号密码在服务启动日志中打印，或查看 <code>server/data/INITIAL_PASSWORD.txt</code>；API / 油猴脚本调用仍使用 <code>X-API-Key</code>';
         const err = new URLSearchParams(location.search).get('error');
         if (err) $('#gate-error').textContent = err;
+        // 打开首页自动跳转 SSO（备用登录仅通过隐藏入口进入，页面不展示）
+        if (oidc && !forceLocal && autoSso) {
+            $('#gate-sub').textContent = '正在跳转 SSO 单点登录…';
+            window.location.href = API_BASE + 'auth/oidc/login';
+        }
     }
 
     async function loginWithPassword() {
@@ -526,7 +531,7 @@
             $('#gate-user').value = '';
             $('#gate-pass').value = '';
             $('#gate-error').textContent = '';
-            await initGate();
+            await initGate(false);   // 主动退出：显示登录门与 SSO 按钮但不自动跳转（否则静默 SSO 会立刻登回）
             showGate();
         });
 
@@ -666,11 +671,12 @@
 
     bind();
     (async () => {
-        await initGate();
         try {
             const me = await api('/api/auth/me');
             if (me && (me.user || me.keyName)) { await enterApp(); return; }
         } catch (e) { /* 未登录 */ }
+        // 未登录才进登录门（OIDC 启用时自动跳转 SSO；已登录用户不会被带去 IdP）
+        await initGate();
         showGate();
     })();
 })();

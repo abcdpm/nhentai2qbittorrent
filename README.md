@@ -70,6 +70,8 @@ location /nhentai/ {
 
 - 油猴脚本「服务地址」填 `https://paccu.cn/nhentai`（拼接为 `/nhentai/api/...`）
 - 公网暴露时所有 API 仍需 API Key，安全机制不变
+- **⚠ 不要在该 location 里配置 `proxy_redirect` 改写 Location**——服务端的跳转（含 OIDC 回调/错误跳转）已自带正确子路径前缀（由 `oidcRedirectUri` 推导）；若用 `proxy_redirect` 把 `/x` 或 `https://host/` 改写为 `https://host/nhentai/...`，会**误伤跳转 IdP 的授权地址**（`https://host/authentik/...` 被改成 `https://host/nhentai/authentik/...`，SSO 登录转一圈回到登录页）
+- OIDC 子路径部署：设置里显式配置 `oidcRedirectUri` 为 `https://paccu.cn/nhentai/auth/oidc/callback`（authentik 等 IdP 的 redirect_uri 需一致）
 
 
 **首次启动**会自动生成一枚 API Key，打印在日志里，并写入 `server/data/INITIAL_API_KEY.txt`（复制后建议删除该文件）。
@@ -123,6 +125,9 @@ GET/PUT /api/settings                 GET/POST /api/keys     DELETE /api/keys/:i
 ## 更新日志
 
 ### Web 控制台（镜像 5.0.5）
+- **修复：子路径部署下 OIDC 重定向丢前缀 / 被 nginx proxy_redirect 误伤**——回调成功/失败的跳转原先为根相对地址 `Location: /`（子路径部署会跳出 `/nhentai` 落到 404），常见"用 proxy_redirect 打补丁"的做法又会把跳转 IdP 的 `https://host/authentik/...` 误改成 `https://host/nhentai/authentik/...`，导致**SSO 登录后退出再登录转一圈回到登录页**；现服务端跳转一律由 `oidcRedirectUri` 推导应用基址、自带正确前缀（`https://host/nhentai/`），**升级后请删除 nginx 里为修此问题添加的 `proxy_redirect` 规则**
+- **登录页不再暴露备用登录入口**：`?login=local` 提示从登录页与设置页移除（页面不展示，仅管理员通过文档知晓）；**打开首页自动跳转 SSO 登录**——已登录用户直接进控制台不受影响；主动退出后显示登录门与 SSO 按钮但不自动跳回（避免静默 SSO 立刻登回）；OIDC 失败自动落回备用登录入口，不会循环跳转
+- **修复：OIDC `iss` 校验兼容尾斜杠**——部分 IdP（如 authentik）的 `id_token.iss` 带尾斜杠而配置的 Issuer 不带，触发 "id_token iss 不匹配"；现 `iss` 比对忽略尾斜杠（Issuer 配置保持不带尾斜杠、端点拼接照旧），不同域仍拒绝
 - **修复：Windows 下构建的镜像启动报 `exec /usr/local/bin/entrypoint.sh: no such file or directory`**——`.sh` 脚本被 git（`core.autocrlf=true`）检出为 CRLF 行尾，shebang 的解释器带上 `\r` 导致内核找不到 `/bin/sh\r`；现统一 `*.sh` 为 LF（新增 `.gitattributes` 强制，`*.bat`/`*.cmd` 保持 CRLF），并在 Dockerfile 构建时 `sed` 再清洗一道兜底
 - **历史下载记录精简为仅 gid**：不再记录、展示标题（接口只返回 gid 清单，不再从任务记录补全标题）；列表改为紧凑的 **gid 网格**（等宽字体、点击跳转 nHentai），搜索仅按 gid 过滤
 - **LANraragi 联动新增「上传成功后自动删除本地 zip」**（设置 → LANraragi，`lrrDeleteZipAfterUpload`，默认关闭）：仅在上传成功后删除；上传失败或删除失败（SMB 占用）均保留本地压缩包且不影响任务，任务卡片显示「已上传 LRR，本地已删除」

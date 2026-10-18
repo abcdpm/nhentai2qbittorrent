@@ -137,6 +137,17 @@ function probeConnection(rawUrl, timeoutMs = 5000) {
 function createHandler(ctx) {
     const { config, store, keys, queue, logger, downloader, state, janitor, auth } = ctx;
 
+    /**
+     * 应用对外基址（子路径部署含前缀）：由 oidcRedirectUri 推导（去掉 /auth/oidc/callback）。
+     * OIDC 回调成功/失败都跳回控制台/登录页——跳转自带正确前缀，
+     * 无需（也不应）在 nginx 用 proxy_redirect 改写 Location（会误伤跳转 IdP 的地址）。
+     */
+    function appBaseUrl(req) {
+        const explicit = String(config.get('oidcRedirectUri') || '').trim();
+        const m = explicit.match(/^(.*)\/auth\/oidc\/callback\/?$/);
+        return (m ? m[1].replace(/\/+$/, '') : publicBaseUrl(req).replace(/\/+$/, ''));
+    }
+
     /** 历史下载记录：云端清单 ∪ 服务端已完成任务（仅记录 gid，不记录标题） */
     function historyData() {
         const s = state.get();
@@ -165,7 +176,7 @@ function createHandler(ctx) {
         // ---- OIDC 登录（公开，无需鉴权）----
         if (pathname === '/auth/oidc/login' && method === 'GET') {
             if (!auth || !auth.isOidcEnabled()) {
-                res.writeHead(302, { Location: '/?login=local&error=' + encodeURIComponent('未配置 OIDC 登录') });
+                res.writeHead(302, { Location: appBaseUrl(req) + '/?login=local&error=' + encodeURIComponent('未配置 OIDC 登录') });
                 res.end();
                 return;
             }
@@ -175,7 +186,7 @@ function createHandler(ctx) {
                 res.end();
             } catch (e) {
                 logger.warn(`OIDC 登录发起失败: ${e.message}`);
-                res.writeHead(302, { Location: '/?login=local&error=' + encodeURIComponent(e.message) });
+                res.writeHead(302, { Location: appBaseUrl(req) + '/?login=local&error=' + encodeURIComponent(e.message) });
                 res.end();
             }
             return;
@@ -188,12 +199,12 @@ function createHandler(ctx) {
                 logger.info(`OIDC 登录成功: ${user.username}`);
                 res.writeHead(302, {
                     'Set-Cookie': auth.sessionCookie(token, req),
-                    Location: '/'
+                    Location: appBaseUrl(req) + '/'
                 });
                 res.end();
             } catch (e) {
                 logger.warn(`OIDC 登录失败: ${e.message}`);
-                res.writeHead(302, { Location: '/?login=local&error=' + encodeURIComponent(e.message) });
+                res.writeHead(302, { Location: appBaseUrl(req) + '/?login=local&error=' + encodeURIComponent(e.message) });
                 res.end();
             }
             return;

@@ -182,7 +182,7 @@
 
                 <div class="card">
                     <h3>登录与安全</h3>
-                    <p class="muted small">Web 控制台登录：OIDC 单点登录为主要入口；账号密码为备用登录（OIDC 启用后登录页自动隐藏账号密码入口，可手动访问 <code>?login=local</code> 进入）。API / 油猴脚本调用继续使用 <code>X-API-Key</code>。</p>
+                    <p class="muted small">Web 控制台登录：OIDC 单点登录为主要入口（打开页面自动跳转）；账号密码为备用登录（入口不在页面展示，仅供管理员在 SSO 不可用时使用）。API / 油猴脚本调用继续使用 <code>X-API-Key</code>。</p>
                     <h3>修改登录密码</h3>
                     <div class="form-grid">
                         <label class="field"><span>当前密码</span><input type="password" id="pw-current" autocomplete="current-password"></label>

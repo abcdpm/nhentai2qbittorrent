@@ -76,7 +76,7 @@ function bootstrap() {
         logger.warn('====================================================');
     }
     if (auth.isOidcEnabled()) {
-        logger.info(`OIDC 单点登录已启用（SSO 为登录主入口，账号密码为备用：/?login=local）`);
+        logger.info(`OIDC 单点登录已启用（SSO 为登录主入口，账号密码为备用登录）`);
     }
     const handler = createHandler({ config, store, keys, queue, logger, downloader, state, janitor, auth });
     const server = http.createServer((req, res) => {

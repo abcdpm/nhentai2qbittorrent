@@ -313,7 +313,9 @@ class AuthManager {
         if (alg !== 'RS256' && alg !== 'ES256') throw new Error(`不支持的 id_token 签名算法: ${alg || 'none'}`);
 
         const now = Math.floor(Date.now() / 1000);
-        if (payload.iss !== issuer) throw new Error('id_token iss 不匹配');
+        // iss 比对忽略尾斜杠（部分 IdP 如 authentik 的 id_token.iss 带尾斜杠；配置的 Issuer 保持不带尾斜杠，端点拼接照旧）
+        const normIss = (s) => String(s == null ? '' : s).replace(/\/+$/, '');
+        if (normIss(payload.iss) !== normIss(issuer)) throw new Error('id_token iss 不匹配');
         const aud = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
         if (!aud.includes(audience)) throw new Error('id_token aud 不匹配');
         if (!payload.exp || Number(payload.exp) < now - 30) throw new Error('id_token 已过期');

@@ -1266,7 +1266,8 @@ test('OIDC 单点登录全链路（Mock IdP：discovery / PKCE / RS256 验签 / 
                 const now = Math.floor(Date.now() / 1000);
                 const h = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: 'test-key' })).toString('base64url');
                 const pl = Buffer.from(JSON.stringify({
-                    iss: idpBase, sub: 'user-001', aud: 'test-client',
+                    // iss 带尾斜杠：模拟 authentik 等 IdP（配置的 Issuer 不带尾斜杠，比对应忽略尾斜杠）
+                    iss: idpBase + '/', sub: 'user-001', aud: 'test-client',
                     exp: now + 600, iat: now, nonce: authReq.nonce, preferred_username: 'sso-user'
                 })).toString('base64url');
                 const signer = crypto.createSign('RSA-SHA256');
@@ -1317,7 +1318,7 @@ test('OIDC 单点登录全链路（Mock IdP：discovery / PKCE / RS256 验签 / 
         // ③ 模拟 IdP 回跳 → 换 token + 验签 → 建会话
         res = await fetch(`${base}/auth/oidc/callback?code=good-code&state=${authReq.state}`, { redirect: 'manual' });
         assert.strictEqual(res.status, 302);
-        assert.strictEqual(res.headers.get('location'), '/');
+        assert.strictEqual(res.headers.get('location'), base + '/', '登录成功应跳回应用基址（子路径部署含前缀）');
         const setCookie = res.headers.get('set-cookie') || '';
         assert.ok(/nh_sid=/.test(setCookie), 'OIDC 登录成功应创建会话');
         const sid = setCookie.split(';')[0];
@@ -1336,9 +1337,65 @@ test('OIDC 单点登录全链路（Mock IdP：discovery / PKCE / RS256 验签 / 
         // ⑤ state 一次性：重放同一 state 应失败
         res = await fetch(`${base}/auth/oidc/callback?code=good-code&state=${authReq.state}`, { redirect: 'manual' });
         assert.ok((res.headers.get('location') || '').includes('login=local'), 'state 不可重放');
+
+        // ⑥ iss 仅忽略尾斜杠比对：不同域仍拒绝（尾斜杠兼容不等于放宽比对）
+        const now6 = Math.floor(Date.now() / 1000);
+        const h6 = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT', kid: 'test-key' })).toString('base64url');
+        const pl6 = Buffer.from(JSON.stringify({
+            iss: 'http://evil.example/', sub: 'x', aud: 'test-client', exp: now6 + 600, iat: now6
+        })).toString('base64url');
+        const signer6 = crypto.createSign('RSA-SHA256');
+        signer6.update(h6 + '.' + pl6);
+        const sig6 = signer6.sign(privateKey).toString('base64url');
+        await assert.rejects(
+            () => auth.verifyIdToken(`${h6}.${pl6}.${sig6}`, {
+                issuer: env.config.data.oidcIssuer, audience: 'test-client',
+                jwksUri: `http://127.0.0.1:${idp.address().port}/jwks`
+            }),
+            /iss 不匹配/,
+            '不同域的 iss 必须拒绝'
+        );
     } finally {
         server.close();
         idp.close();
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('OIDC 跳转地址：子路径部署由 oidcRedirectUri 推导应用基址（回调/错误不丢前缀）', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    const keys = new KeyStore(env.tmp, env.logger);
+    keys.create('k');
+    env.config.data.oidcIssuer = 'https://idp.example/application/o/app';
+    env.config.data.oidcClientId = 'c';
+    env.config.data.oidcRedirectUri = 'https://host.example/nhentai/auth/oidc/callback';
+    const auth = new AuthManager({ dataDir: env.tmp, config: env.config, logger: env.logger });
+    auth.ensureBootstrapUser();
+    const handler = createHandler({
+        config: env.config, store: env.store, keys, queue: env.queue,
+        logger: env.logger, downloader: env.downloader, state: new StateStore(env.tmp), auth
+    });
+    const server = http.createServer((req, res) => handler(req, res).catch(() => { res.writeHead(500); res.end(); }));
+    await new Promise(r => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+        // ① 回调失败（state 无效）→ 跳回带前缀的备用登录（不得丢 /nhentai）
+        let res = await fetch(`${base}/auth/oidc/callback?code=x&state=bogus`, { redirect: 'manual' });
+        assert.strictEqual(res.status, 302);
+        const loc1 = res.headers.get('location') || '';
+        assert.ok(loc1.startsWith('https://host.example/nhentai/?login=local'), `错误跳转应带应用基址，实际: ${loc1}`);
+        assert.ok(loc1.includes('error='), '应携带错误信息');
+
+        // ② 未配置 OIDC 时 /auth/oidc/login 同样跳回带前缀的登录页
+        env.config.data.oidcIssuer = '';
+        res = await fetch(`${base}/auth/oidc/login`, { redirect: 'manual' });
+        assert.strictEqual(res.status, 302);
+        assert.ok((res.headers.get('location') || '').startsWith('https://host.example/nhentai/?login=local'),
+            '未配置 OIDC 的跳转同样应带应用基址');
+    } finally {
+        server.close();
         await env.queue.stop();
         mock.close();
     }
@@ -1570,6 +1627,7 @@ test('Web 界面与静态资源可访问（无需密钥）', async () => {
         assert.ok(html.includes('nHentai 下载服务'));
         assert.ok(html.includes('href="style.css') && html.includes('src="app.js') && html.includes('href="favicon.svg"'),
             '静态资源应使用相对路径（支持 /nhentai 子路径反代）');
+        assert.ok(!html.includes('login=local'), '页面不得暴露备用登录入口（?login=local）');
         const css = await fetch(base + '/style.css');
         assert.strictEqual(css.status, 200);
         const js = await fetch(base + '/app.js');
