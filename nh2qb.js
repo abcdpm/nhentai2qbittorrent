@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         nHentai → Local Image Scraper
 // @namespace    http://tampermonkey.net/
-// @version      5.11.0
+// @version      5.12.1
 // @description  直接提取高清原图下载；「推送到下载服务」自动附带元数据（media_id/Pages数），服务端纯CDN下载避开官方API限流；完整性校验/超时重传/多CDN轮询/WebP统一/自动压缩zip；下载完成自动标记已下载；文件夹格式：本子名 [本子id]
 // @author       Paccu
 // @match        https://nhentai.net/g/*
@@ -287,35 +287,50 @@
         return `<button class="btn btn-success nh-meta-retry-btn" data-nh-meta-retry="${token}" style="margin-top:8px;font-size:12px;min-height:30px;padding:6px 14px;">🔁 重试解析元数据并重新传送给下载服务</button>`;
     }
 
+    /** 关闭包含指定元素的通知弹窗（淡出），用于清理已完成的重试入口、避免残留「重试中…」状态 */
+    function dismissNotifyOf(el) {
+        const box = el && el.closest ? el.closest('.nh-qb-notify') : null;
+        if (!box) return;
+        box.classList.remove('show');
+        box.style.opacity = '0';
+        setTimeout(() => { try { box.remove(); } catch (e) {} }, 400);
+    }
+
     /**
      * 快速重试：逐本重新解析元数据（各 3 次）→ 重新 POST /api/tasks 传送给下载服务。
      * 服务端对缺 meta 的活动任务补挂、失败任务随补挂自动重新入队继续下载。
+     * 结束后（无论成败）关闭含「重试中…」按钮的旧提示，结果由新弹窗展示。
      */
-    async function retryMetaAndPush(items) {
+    async function retryMetaAndPush(items, sourceBtn) {
         if (!items || !items.length) return;
         const okItems = [];
         const stillFailed = [];
-        for (let i = 0; i < items.length; i++) {
-            stickyNotify('nh-meta-retry', `<div class='title'>🔁 正在重试解析元数据 (${i + 1}/${items.length})...</div>`);
-            const meta = await fetchMetaForPush(items[i].gid);
-            if (meta) okItems.push({ gid: items[i].gid, title: items[i].title, meta });
-            else stillFailed.push(items[i]);
-            if (i < items.length - 1 && META_PARSE_INTERVAL_MS > 0) await new Promise(r => setTimeout(r, META_PARSE_INTERVAL_MS));
-        }
-        let result = null;
-        if (okItems.length) result = await pushItemsToServer(okItems);
-        // 关闭进度提示
-        const prog = document.getElementById('nh-meta-retry');
-        if (prog) { prog.classList.remove('show'); prog.style.opacity = '0'; setTimeout(() => { try { prog.remove(); } catch (e) {} }, 400); }
+        try {
+            for (let i = 0; i < items.length; i++) {
+                stickyNotify('nh-meta-retry', `<div class='title'>🔁 正在重试解析元数据 (${i + 1}/${items.length})...</div>`);
+                const meta = await fetchMetaForPush(items[i].gid);
+                if (meta) okItems.push({ gid: items[i].gid, title: items[i].title, meta });
+                else stillFailed.push(items[i]);
+                if (i < items.length - 1 && META_PARSE_INTERVAL_MS > 0) await new Promise(r => setTimeout(r, META_PARSE_INTERVAL_MS));
+            }
+            let result = null;
+            if (okItems.length) result = await pushItemsToServer(okItems);
+            // 关闭进度提示
+            const prog = document.getElementById('nh-meta-retry');
+            if (prog) { prog.classList.remove('show'); prog.style.opacity = '0'; setTimeout(() => { try { prog.remove(); } catch (e) {} }, 400); }
 
-        const revived = result ? ((result.added || []).length + (result.updated || []).length) : 0;
-        const failedItems = result ? stillFailed
-            : okItems.map(it => ({ gid: it.gid, title: it.title })).concat(stillFailed);
-        notify(`
-            <div class='title' style="color:${okItems.length && result ? '#4caf50' : '#ff9800'};">🔁 元数据重试：解析成功 ${okItems.length}/${items.length}${result ? '' : '（重新传送失败）'}</div>
-            ${result && okItems.length ? `<div style="font-size:12px;color:#8bc34a;margin-top:4px;">已重新传送给下载服务${revived ? `（${revived} 本已补挂元数据 / 重新入队）` : ''}</div>` : ''}
-            ${failedItems.length ? `<div style="font-size:12px;color:#ff9800;margin-top:6px;">仍失败（GID ${escapeHtml(failedItems.map(it => String(it.gid)).join('、'))}），可能是页面被 Cloudflare 拦截——可再次重试，或稍后打开对应详情页自动补挂</div>${metaRetryButtonHtml(failedItems)}` : ''}
-        `, Infinity);
+            const revived = result ? ((result.added || []).length + (result.updated || []).length) : 0;
+            const failedItems = result ? stillFailed
+                : okItems.map(it => ({ gid: it.gid, title: it.title })).concat(stillFailed);
+            notify(`
+                <div class='title' style="color:${okItems.length && result ? '#4caf50' : '#ff9800'};">🔁 元数据重试：解析成功 ${okItems.length}/${items.length}${result ? '' : '（重新传送失败）'}</div>
+                ${result && okItems.length ? `<div style="font-size:12px;color:#8bc34a;margin-top:4px;">已重新传送给下载服务${revived ? `（${revived} 本已补挂元数据 / 重新入队）` : ''}</div>` : ''}
+                ${failedItems.length ? `<div style="font-size:12px;color:#ff9800;margin-top:6px;">仍失败（GID ${escapeHtml(failedItems.map(it => String(it.gid)).join('、'))}），可能是页面被 Cloudflare 拦截——可再次重试，或稍后打开对应详情页自动补挂</div>${metaRetryButtonHtml(failedItems)}` : ''}
+            `, Infinity);
+        } finally {
+            // 重试结束：关闭旧提示（含「重试中…」按钮），避免残留重试中状态
+            dismissNotifyOf(sourceBtn);
+        }
     }
 
     // 事件委托：点击「重试」按钮（notify 的点击关闭逻辑忽略 BUTTON 目标，不会误关弹窗）
@@ -326,7 +341,7 @@
         if (!items.length) return;
         btn.disabled = true;
         btn.textContent = '重试中…';
-        retryMetaAndPush(items);
+        retryMetaAndPush(items, btn);
     });
 
     /** 将若干本子推送到本地下载服务的队列 */
@@ -425,8 +440,8 @@
      * （与本地下载完成后的标记逻辑一致：已下载角标 + 封面变暗 + 取消勾选）
      *
      * 可靠性说明：完成状态由服务端持久化（唯一事实源），本函数只是"拉取补标"。
-     * 即使推送后浏览器被关闭，下次打开任意 nHentai 页面 3 秒内即会补上标记，
-     * 并对你推送过的任务弹「下载完成」提示。
+     * 即使推送后浏览器被关闭，下次打开任意 nHentai 页面 3 秒内即会补上标记；
+     * 完成同步为静默进行（仅更新角标/勾选状态，不弹通知打扰）。
      */
     /**
      * 「已下载最大 GID / 上次下载最大 GID」显示（右下角面板）：
@@ -483,7 +498,6 @@
         const pushedMap = readPushedMap();
         let changed = false;
         let checkedChanged = false;
-        const justDone = [];
 
         // ① 已下载清单（服务端全部完成任务 ∪ 云端清单）
         const newDone = [];   // 本批新完成的 gid——稍后按升序逐本滚动水位线
@@ -501,11 +515,6 @@
                 if (cb) cb.checked = false;
             }
 
-            const isMine = !!pushedMap[gid];
-            const recent = (d.recentDone || []).find(r => String(r.gid) === gid);
-            const finishedAt = recent && recent.finishedAt ? new Date(recent.finishedAt).getTime() : 0;
-            const isRecent = finishedAt && (Date.now() - finishedAt) < 15 * 60 * 1000;
-            if (recent && (isMine || isRecent)) justDone.push(recent);
             if (pushedMap[gid]) delete pushedMap[gid];
 
             // 收集本批水位线记录（时间统一为记录/上传到 web 服务 API 时的本地时间）
@@ -539,14 +548,7 @@
             requestRender();
         }
 
-        if (justDone.length) {
-            const names = justDone.slice(0, 3).map(t => escapeHtml(t.title || t.gid)).join('<br>');
-            const more = justDone.length > 3 ? `<div style="color:#aaa;font-size:11px;">… 等共 ${justDone.length} 本</div>` : '';
-            notify(`
-                <div class='title' style="color:#4caf50;">✅ 下载完成（已自动标记已下载）</div>
-                <div style="font-size:12px;color:#ccc;word-break:break-all;">${names}</div>${more}
-            `, 10000);
-        }
+        // 下载完成静默同步：仅更新角标/勾选等状态（上面的逻辑），不弹通知打扰
 
         // ③ 缺元数据的任务：若浏览器正开着对应详情页，自动解析当前页面补挂（失败任务随补挂自动重新入队）
         needMetaSet = new Set((d.needMeta || []).map(String));
