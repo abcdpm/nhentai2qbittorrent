@@ -125,6 +125,7 @@ GET/PUT /api/settings                 GET/POST /api/keys     DELETE /api/keys/:i
 ## 更新日志
 
 ### Web 控制台（镜像 5.0.5）
+- **LANraragi 插件升级到 3.1（Cloudflare 诊断）**：`/g/{id}/`、`/search` 现在由 Cloudflare 托管挑战保护，无效 `cf_clearance` 会直接返回 **403 + “Just a moment...” 挑战页**（不是本子不存在、也不是页面改版）；插件新增浏览器化请求头（按 UA 生成一致的 `sec-ch-ua`/`sec-fetch-*`）、挑战页识别 + 3 次退避重试、`NHENTAI_BASE_URL` 镜像/反代兜底，并把 403 翻译成「5 条排查清单 + UA/cookie/cf_clearance 诊断」；标签选择器兼容 `.tag-container`/`#tags`/`.tagchip`；**不使用官方 API**（v1 已下线、v2 限流严格）
 - **修复：子路径部署下 OIDC 重定向丢前缀 / 被 nginx proxy_redirect 误伤**——回调成功/失败的跳转原先为根相对地址 `Location: /`（子路径部署会跳出 `/nhentai` 落到 404），常见"用 proxy_redirect 打补丁"的做法又会把跳转 IdP 的 `https://host/authentik/...` 误改成 `https://host/nhentai/authentik/...`，导致**SSO 登录后退出再登录转一圈回到登录页**；现服务端跳转一律由 `oidcRedirectUri` 推导应用基址、自带正确前缀（`https://host/nhentai/`），**升级后请删除 nginx 里为修此问题添加的 `proxy_redirect` 规则**
 - **登录页不再暴露备用登录入口**：`?login=local` 提示从登录页与设置页移除（页面不展示，仅管理员通过文档知晓）；**打开首页自动跳转 SSO 登录**——已登录用户直接进控制台不受影响；主动退出后显示登录门与 SSO 按钮但不自动跳回（避免静默 SSO 立刻登回）；OIDC 失败自动落回备用登录入口，不会循环跳转
 - **修复：OIDC `iss` 校验兼容尾斜杠**——部分 IdP（如 authentik）的 `id_token.iss` 带尾斜杠而配置的 Issuer 不带，触发 "id_token iss 不匹配"；现 `iss` 比对忽略尾斜杠（Issuer 配置保持不带尾斜杠、端点拼接照旧），不同域仍拒绝
