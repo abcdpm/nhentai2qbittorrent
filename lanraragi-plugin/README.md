@@ -41,8 +41,8 @@ retry-after: 60
 
 ### 插件内置的保护
 
-- **本地节流**：相邻两次 API 请求至少间隔固定/自动值——**没配 API Key 时 3.2s（≈20/分钟），配了 Key 自动放宽到 1.5s（≈40/分钟）**，批量打标签也不会自杀
-- **429 自适应退避**：读 `retry-after`，等得起就等待重试（最多 3 次）；`retry-after` 超过 `NHENTAI_API_MAX_WAIT`（默认 20s）则**立刻回退 HTML**，不卡死 LRR 队列
+- **本地节流（跨进程）**：用 LRR 自带 **Redis** 记录「上次请求时间」，多个 worker 进程共享同一配额——**没配 API Key 时 3.2s（≈20/分钟），配了 Key 自动放宽到 1.5s（≈40/分钟）**；Redis 不可用时回落进程内计时
+- **429 自适应退避**：读 `retry-after`，最多重试 3 次；默认 `NHENTAI_API_MAX_WAIT=90` 足以熬过 nhentai 的 60s 窗口。**等不起时**：手上真的有 `cf_clearance` 才回退 HTML，否则直接报「限流 + 无 cookie」的可操作错误（不白跑注定 403 的 HTML）
 - **404 立即失败**：明确报「本子不存在或已删除」，不再无谓重试
 - **API 无标签 / 不可用**：自动回退 3.1 的 HTML DOM 抓取（此时才需要 Cookie）
 - 命名空间规则与 HTML 路径完全一致：`tag` 无前缀，`language:` / `category:` / `character:` / `parody:` / `artist:` / `group:` 带前缀；并附带 `source:nhentai.net/g/{id}`
@@ -85,11 +85,38 @@ environment:
 | `NHENTAI_API_KEY` | 空 | nhentai.net 账号 API Key；也可直接填在插件设置页（优先级更高），填写后 45 次/分钟（可把 `NHENTAI_API_MIN_INTERVAL` 调到 1.4） |
 | `NHENTAI_BASE_URL` | `https://nhentai.net` | 镜像或自建反代，API 与 HTML 请求都会走它 |
 | `NHENTAI_API_MIN_INTERVAL` | 自动 | 本地最小请求间隔（秒）；**不设置时自动**：配了 API Key → `1.5`（≈40 次/分钟），没配 → `3.2`（≈20 次/分钟）；显式设置则覆盖（`0` = 不节流） |
-| `NHENTAI_API_MAX_WAIT` | `20` | 429 时最多等多久；更大的 `retry-after` 直接回退 HTML |
+| `NHENTAI_API_MAX_WAIT` | `90` | 429 时最多等多久（nhentai 窗口是 60s，90 足够熬过去）；`retry-after` 更大才放弃等待 |
 | `NHENTAI_API_DISABLE` | 空 | 设为 `1` 则完全不用 API，只走 HTML（旧行为/排查用） |
 
 > **什么时候仍然需要 Cookie**：只有回退到 HTML 时才需要（拉 `#info h1` 标题和 `.tag-container` 标签）。
 > 正常元数据抓取已不再需要 `cf_clearance`，也就不再受它「几分钟就过期」的影响。
+
+## 429 排障：`v2 API 限流：需等待 60s` / `rate_limited(60s)`
+
+日志长这样：
+
+```
+[nHentai (Custom Fixed)] [warn] v2 API 限流：需等待 60s（超过 NHENTAI_API_MAX_WAIT=90），直接回退 HTML
+[nHentai (Custom Fixed)] [warn] v2 API 不可用（rate_limited(60s)），回退 HTML DOM
+```
+
+含义：**这个出口 IP 在最近一分钟内把 v2 配额用完了**（匿名 20 次/分钟）。常见原因：
+
+1. **Auto-Plugin 批量打标签**：一次处理几十本，20 本/分钟就是硬上限
+2. **多个 worker 进程各自计时**（3.2 起已用 Redis 做全局节流，跨进程共享配额）
+3. **同 IP 的其它程序/浏览器也在访问 nhentai**（配额按公网 IP 算，浏览器刷网页也会占用）
+
+处理办法：
+
+- 插件默认会**按 `retry-after` 等 60s 再重试**（`NHENTAI_API_MAX_WAIT` 默认 90），不会立即失败
+- 填 **nhentai API Key**（插件设置页）→ 45 次/分钟，节流自动放宽到 1.5s
+- 大批量想更稳：`NHENTAI_API_MIN_INTERVAL=5`
+- **没有 cf_clearance 时不会回退 HTML**（回退必然被挑战），而是直接报：
+  `v2 API 触发限流…且当前没有可用的 cf_clearance` + 4 条处置建议 —— 等 1 分钟重跑即可
+
+> 你日志里的 `cookie 数=1[] | cf_clearance=缺失` 还有一个信息：CF Bypass 插件注入的 Cookie **名称为空**
+> （只填了值、没写成 `cf_clearance=xxx`），这种 Cookie 在 HTML 路径上 100% 会被挑战。
+> 3.2 的 v2 API 路径完全不用 Cookie，所以这个坑对元数据抓取已经没影响了。
 
 ## 403 排障：`Error retrieving gallery from nHentai! (Code: 403)` 是什么
 
@@ -183,11 +210,12 @@ LANraragi → 插件配置 → 上传 `nHentaiCustom.pm`（覆盖旧版即可，
 perl lanraragi-plugin/test/cf-diagnostics-test.pl
 ```
 
-覆盖 **47 项断言**：
+覆盖 **51 项断言**：
 
 - **API 通道（3.2）**：JSON → tags 映射（tag 无前缀 / category·language·artist 带前缀 / source 标签）、`pretty` 标题、
   429 按 `retry-after` 退避重试、404 不重试且明确报错、限流超阈值自动回退 HTML、v2 搜索选中最匹配候选、`{id}` 语法零请求、标题归一化、
-  **API Key 优先级（插件设置页 > 环境变量 > 不认证）与节流自动放宽（1.5s / 3.2s）**
+  **API Key 优先级（插件设置页 > 环境变量 > 不认证）与节流自动放宽（1.5s / 3.2s）**、
+  **限流时「有 cf_clearance 才回退 HTML、否则直接报错」、空名 Cookie 的诊断提示**
 - **Cloudflare 诊断（3.1）**：挑战页识别（403 挑战页 / 普通 403 / 404 / `cf-mitigated` 头）、
   浏览器化请求头与 UA 一致性、`_nh_get` 重试（先挑战后成功）、连续挑战的报错清单、诊断信息（cookie 数量与 `cf_clearance` 有无）、404 不重试
 

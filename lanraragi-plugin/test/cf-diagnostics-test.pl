@@ -237,11 +237,12 @@ my $errE = '';
 eval { $get_tags_sub->( '1', $uaE, 0 ); 1 } or $errE = $@;
 ok( $errE =~ /Code: 404/, 'API 404 时明确报「本子不存在」' );
 
-# ---- 10. API 被限流 → 自动回退 HTML ----
-$ENV{NHENTAI_API_MAX_WAIT} = 0;    # retry-after 超过该值就立即回退，不做无谓等待
+# ---- 10. API 被限流：有 cf_clearance 才回退 HTML；没有则直接报明确错误 ----
+$ENV{NHENTAI_API_MAX_WAIT} = 0;    # retry-after 超过该值就立即放弃等待
 my $res429b = FakeRes->new( code => 429, body => '{"error":"Rate limit exceeded"}' );
 $res429b->headers->header( 'retry-after' => '60' );
 my $uaF = FakeUA->new(
+    cookies   => ['cf_clearance'],     # 握有 cf_clearance → 值得尝试 HTML
     responses => [
         $res429b,
         map { FakeRes->new( code => 403, body => '<title>Just a moment...</title>' ) } 1 .. 3
@@ -249,8 +250,19 @@ my $uaF = FakeUA->new(
 );
 my $errF = '';
 eval { $get_tags_sub->( '694315', $uaF, 0 ); 1 } or $errF = $@;
-ok( $errF =~ /Cloudflare 挑战页拦截/, 'API 限流后回退 HTML（HTML 被挑战则报 CF 诊断）' );
-ok( $uaF->{n} >= 2, 'API 失败后确实发起过 HTML 请求' );
+ok( $errF =~ /Cloudflare 挑战页拦截/, '限流 + 有 cf_clearance → 回退 HTML（被挑战则报 CF 诊断）' );
+ok( $uaF->{n} >= 2, '确实发起过 HTML 请求' );
+
+# 没有 cf_clearance 时不该白跑注定被挑战的 HTML：直接报可操作错误
+my $res429c = FakeRes->new( code => 429, body => '{"error":"Rate limit exceeded"}' );
+$res429c->headers->header( 'retry-after' => '60' );
+my $uaL = FakeUA->new(
+    responses => [ $res429c, FakeRes->new( code => 200, body => 'should not be used' ) ] );
+my $errL = '';
+eval { $get_tags_sub->( '694315', $uaL, 0 ); 1 } or $errL = $@;
+ok( $errL =~ /v2 API 触发限流/, '无 cf_clearance 时限流直接报明确错误' );
+ok( $errL =~ /API Key/,        '错误里给出「配置 API Key」的建议' );
+ok( $uaL->{n} == 1,            '无 cf_clearance 时不会白跑 HTML 请求（只发了 1 次）' );
 delete $ENV{NHENTAI_API_MAX_WAIT};
 
 # ---- 11. 按标题搜索：v2 搜索优先 ----
@@ -313,6 +325,11 @@ ok( $interval_sub->() == 1.5, '配了 API Key 时节流自动放宽到 1.5s（�
 
 ${"${pkg}::NH_API_KEY"} = '';
 ok( $interval_sub->() == 3.2, '没有 API Key 时保持 3.2s（20 次/分钟）' );
+
+# ---- 15. 诊断：空名 Cookie 会被提示为 login 插件注入格式问题 ----
+my $uaM   = FakeUA->new( ua_name => 'UA', cookies => [ '', 'cf_clearance' ] );
+my $diagM = $diag_sub->( $uaM, 'https://nhentai.net/g/1/' );
+ok( $diagM =~ /空名 Cookie/, '空名 Cookie 时诊断提示 CF Bypass 注入格式问题' );
 
 print "\n" . ( @FAILS ? '失败 ' . scalar(@FAILS) . " 项\n" : "全部通过\n" );
 exit( @FAILS ? 1 : 0 );

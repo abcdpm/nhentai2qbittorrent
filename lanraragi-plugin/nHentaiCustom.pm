@@ -151,12 +151,15 @@ sub _nh_base_url {
 #   gallery 详情 45/分钟、搜索 20/分钟、列表 30/分钟
 # 429 响应头携带 retry-after，按它退避即可；请求过快只会 429，不会被 CF 挑战。
 #
-# 因此：默认「API 优先 + HTML 回退」，并用 NHENTAI_API_MIN_INTERVAL 做本地节流
-# （默认 3.2s ≈ 20/min），超过上限视为不可用自动回退 HTML。
-#   NHENTAI_API_KEY          可选，设置后 45 次/分钟（默认 3.2s 节流可放宽到 1.4s）
+# 因此：默认「API 优先 + HTML 回退」，两点关键策略：
+#   1) 节流是**全局**的（用 LRR 自带 Redis 存上次请求时间），跨 worker 进程也守得住 20/min；
+#      默认速率：无 Key 3.2s/次，配了 API Key 自动放宽到 1.5s/次
+#   2) 429 时按 retry-after 等待（默认最多等 90s，足够熬过 nhentai 的 60s 窗口）；
+#      等不起且手上没有 cf_clearance 时直接报明确错误，不去白跑注定被挑战的 HTML
+#   NHENTAI_API_KEY          可选，设置后 45 次/分钟（节流自动放宽到 1.5s）
 #   NHENTAI_API_DISABLE=1    完全禁用 API，只用 HTML DOM（旧行为）
-#   NHENTAI_API_MIN_INTERVAL 本地最小请求间隔（秒，默认 3.2；0=不节流）
-#   NHENTAI_API_MAX_WAIT     429 时最多等待的秒数（默认 20；retry-after 更大则直接回退 HTML）
+#   NHENTAI_API_MIN_INTERVAL 本地最小请求间隔（秒；不设置=自动，0=不节流）
+#   NHENTAI_API_MAX_WAIT     429 时最多等待的秒数（默认 90；retry-after 更大则放弃等待）
 # ---------------------------------------------------------------------------
 
 sub _nh_effective_key {
@@ -181,10 +184,46 @@ sub _nh_sleep {
     select( undef, undef, undef, $secs );
 }
 
-# 进程内节流：保证相邻两次 API 请求至少间隔 N 秒（LRR 批量任务时不会打爆 20/min）
+# 是否真的拿到了 cf_clearance（决定「API 限流时回退 HTML 有没有意义」）
+sub _has_cf_clearance {
+    my ($ua) = @_;
+    return 0 unless $ua;
+    my $found = 0;
+    eval {
+        my @cookies = $ua->cookie_jar ? $ua->cookie_jar->all : ();
+        for my $c (@cookies) {
+            my $n = eval { $c->name } // '';
+            $found = 1 if $n eq 'cf_clearance';
+        }
+    };
+    return $found;
+}
+
+# 全局（跨进程）节流：
+# LRR 的自动插件跑在多个 worker 进程里，仅靠进程内时间戳会各自为政 —— 总速率 ×worker 数，
+# 直接把 20 次/分钟的配额打爆（实测现象：一次性批量打标签后全站 429 60s）。
+# 因此优先用 LRR 自带的 Redis 存「最近一次 API 请求时间」，实现真正的全局节流；Redis 不可用时回落进程内。
 sub _nh_api_throttle {
     my $gap = _nh_api_min_interval();
     return if $gap <= 0;
+
+    my $redis_last;
+    my $has_redis = eval {
+        $redis_last = LANraragi::Utils::Redis::redis_get('nhcustom_api_last_call');
+        1;
+    };
+
+    if ($has_redis) {
+        $redis_last = 0
+          unless defined $redis_last && "$redis_last" =~ /^\d+(?:\.\d+)?$/;
+        my $wait = $redis_last + $gap - time();
+        _nh_sleep($wait) if $wait > 0;
+        my $now = time();
+        eval { LANraragi::Utils::Redis::redis_set( 'nhcustom_api_last_call', $now ) };
+        $NH_API_LAST = $now;
+        return;
+    }
+
     my $wait = $NH_API_LAST + $gap - time();
     _nh_sleep($wait) if $wait > 0;
     $NH_API_LAST = time();
@@ -201,7 +240,7 @@ sub _nh_api_get {
     my $key = _nh_effective_key();
 
     my $max_wait = $ENV{NHENTAI_API_MAX_WAIT};
-    $max_wait = 20 unless defined $max_wait && $max_wait =~ /^\d+$/;
+    $max_wait = 90 unless defined $max_wait && $max_wait =~ /^\d+$/;
 
     my $last = '';
     for my $attempt ( 1 .. 3 ) {
@@ -372,10 +411,14 @@ sub _request_diag {
         }
     };
     my $shown = @names > 8 ? join( ',', @names[ 0 .. 7 ] ) . ',…' : join( ',', @names );
+    # 空名 Cookie = login 插件注入格式不对（不能只写 cf_clearance 的值，要写成 cf_clearance=xxx）
+    my $hint = '';
+    $hint = ' | ⚠ 检测到空名 Cookie：nHentai CF Bypass 的 Cookie 字段格式可能不对（应为 cf_clearance=…; __cf_bm=…）'
+      if grep { !defined($_) || $_ eq '' } @names;
 
     return sprintf(
-        'URL=%s | UA=%s | cookie 数=%d[%s] | cf_clearance=%s',
-        $url, $ua_str, $count, $shown, $has_cf ? '有' : '缺失'
+        'URL=%s | UA=%s | cookie 数=%d[%s] | cf_clearance=%s%s',
+        $url, $ua_str, $count, $shown, $has_cf ? '有' : '缺失', $hint
     );
 }
 
@@ -566,6 +609,17 @@ sub get_tags_from_NH {
             $logger->warn("v2 API 返回 200 但没有标签（gallery $gID），回退 HTML DOM");
         } elsif ( $err eq 'not_found' ) {
             die "Error retrieving gallery from nHentai! (Code: 404) — 本子 $gID 不存在或已删除\n";
+        } elsif ( $err =~ /^rate_limited/ ) {
+            # 限流 ≠ 接口不可用：只有真的拿到 cf_clearance 时才值得回退 HTML（否则回退必然被 CF 挑战）
+            if ( _has_cf_clearance($ua) ) {
+                $logger->warn("v2 API 限流（$err），已持有 cf_clearance，回退 HTML DOM");
+            } else {
+                die "Error retrieving gallery from nHentai! — v2 API 触发限流（$err），"
+                  . "且当前没有可用的 cf_clearance（回退 HTML 也会被 Cloudflare 挑战）。处理方式："
+                  . "1) 等 1 分钟后重试；2) 插件设置页填 nhentai API Key（额度 45 次/分钟）；"
+                  . "3) 调大 NHENTAI_API_MAX_WAIT（如 120）让插件自动等待限流窗口；"
+                  . "4) 批量打标签时加大 NHENTAI_API_MIN_INTERVAL（如 5）。\n";
+            }
         } else {
             $logger->warn("v2 API 不可用（$err），回退 HTML DOM");
         }
