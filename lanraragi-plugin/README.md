@@ -1,10 +1,95 @@
-# LANraragi nHentai 元数据插件（nHentaiCustom 3.1）
+# LANraragi nHentai 元数据插件（nHentaiCustom 3.2）
 
 单文件 `nHentaiCustom.pm` —— 在原版基础上新增 **[ID] 三级回退识别**（即原 NHentaiByTitleID 的逻辑，已合并回本文件），
-并在 **3.1** 上补齐了 **Cloudflare 挑战诊断**（浏览器化请求头、挑战页识别与重试、可操作的报错日志）。
+3.1 补上 **Cloudflare 挑战诊断**，3.2 改为 **官方 v2 API 优先 + HTML DOM 回退**：
+**元数据默认走 JSON 接口，不再依赖 `cf_clearance` Cookie**。
 
-> **不使用任何官方 API**（v1 `api/gallery/*` 已下线返回 403「Use new API」，v2 有严格限流 20/分钟），
-> 标签始终从 HTML DOM 抓取。
+> v1 接口 `api/gallery/*` 已下线（返回 403「Use new API https://nhentai.net/api/v2/docs」），
+> 现在只剩 v2：`api/v2/galleries/{id}`、`api/v2/search`（纯 JSON、不受 Cloudflare 托管挑战影响，仅有限流）。
+
+## 3.2：API 优先（推荐，无需 Cookie）
+
+`HTTP GET https://nhentai.net/api/v2/galleries/{id}` 实测**不带任何 Cookie/UA 也返回 200**，
+响应里直接就有 `title{english,japanese,pretty}`、`tags[{type,name,slug}]`、`media_id`、`num_pages` ——
+元数据所需字段齐全，所以默认链路变成了：
+
+```
+[id] 识别 → v2 API 详情 → （失败/限流）→ v2 搜索 → （失败）→ HTML DOM（3.1 的 CF 诊断逻辑）
+```
+
+### 实测频率上限（2026-11，匿名 IP 连续打满）
+
+| 端点 | 匿名（每 IP） | 带 API Key |
+| --- | --- | --- |
+| `GET /api/v2/galleries/{id}`（单本详情，**元数据主用**） | **20 次/分钟** | 45 次/分钟 |
+| `GET /api/v2/search`（按标题搜索） | 10 次/分钟 | 20 次/分钟 |
+| `GET /api/v2/galleries`（列表） | 15 次/分钟 | 30 次/分钟 |
+| `GET /api/v2/galleries/{id}/related` | 12 次/分钟 | 30 次/分钟 |
+| `GET /api/v2/galleries/popular` | 8 次/分钟 | 8 次/分钟 |
+
+越过上限的表现（已实测）：
+
+```
+HTTP/2 429
+x-ratelimit-limit: 20
+x-ratelimit-remaining: 0
+retry-after: 60
+{"error":"Rate limit exceeded"}
+```
+
+第 **21** 次连打即 429，之后一分钟内全部 429 —— 但**不会被 Cloudflare 挑战**，`retry-after` 到了就恢复。
+
+### 插件内置的保护
+
+- **本地节流**：相邻两次 API 请求至少间隔固定/自动值——**没配 API Key 时 3.2s（≈20/分钟），配了 Key 自动放宽到 1.5s（≈40/分钟）**，批量打标签也不会自杀
+- **429 自适应退避**：读 `retry-after`，等得起就等待重试（最多 3 次）；`retry-after` 超过 `NHENTAI_API_MAX_WAIT`（默认 20s）则**立刻回退 HTML**，不卡死 LRR 队列
+- **404 立即失败**：明确报「本子不存在或已删除」，不再无谓重试
+- **API 无标签 / 不可用**：自动回退 3.1 的 HTML DOM 抓取（此时才需要 Cookie）
+- 命名空间规则与 HTML 路径完全一致：`tag` 无前缀，`language:` / `category:` / `character:` / `parody:` / `artist:` / `group:` 带前缀；并附带 `source:nhentai.net/g/{id}`
+
+### 填写 API Key（可选：把限流从 20 次/分钟提到 45 次/分钟）
+
+**方式 A（推荐，不用重启）：直接填在 LANraragi 插件设置页**
+
+插件配置 → `nHentai (Custom Fixed)` → 参数 **`nhentai API Key (optional; raises v2 API limit from 20 to 45 req/min)`** → 粘贴 Key → 保存。
+
+> 填了 Key 之后**节流会自动从 3.2s 放宽到 1.5s**（≈40 次/分钟），**不需要**再去改 `NHENTAI_API_MIN_INTERVAL`；
+> 想更快/更保守再显式设置该环境变量即可（显式值优先）。
+
+**方式 B：环境变量**
+
+```yaml
+# docker-compose.yml（LANraragi 容器）
+environment:
+  - NHENTAI_API_KEY=你的key          # 可选，45 次/分钟
+  - NHENTAI_BASE_URL=https://nhentai.你的反代.com   # 可选
+```
+
+改完 `docker compose up -d` 重建容器（环境变量在进程启动时注入，热改无效）。
+
+**Key 从哪来**：登录 nhentai.net → 右上头像 → **Settings → API Keys**
+（<https://nhentai.net/user/settings#apikeys>）→ 新建 → 复制。
+
+> ⚠️ 别和 Web 控制台「设置 → LANraragi」里的 **API Key** 搞混：那个是 **LANraragi 自己的上传密钥**（`PUT /api/archives/upload` 用），
+> 这里的 `nhentai API Key` 是 **nhentai.net 账号**的，只给这个元数据插件用。
+
+**优先级**：插件设置页参数 > 环境变量 `NHENTAI_API_KEY` > 不带认证（20 次/分钟）。
+
+**怎么确认生效**：插件日志里出现 `v2 API 命中：gallery xxx（tags=…, media_id=…, pages=…）` 即正常；
+若日志频繁出现 `v2 API 触发限流（429）`，说明 Key 没生效（检查是否多打了空格）或批量太大。
+
+### 环境变量一览
+
+| 变量 | 默认 | 说明 |
+| --- | --- | --- |
+| `NHENTAI_API_KEY` | 空 | nhentai.net 账号 API Key；也可直接填在插件设置页（优先级更高），填写后 45 次/分钟（可把 `NHENTAI_API_MIN_INTERVAL` 调到 1.4） |
+| `NHENTAI_BASE_URL` | `https://nhentai.net` | 镜像或自建反代，API 与 HTML 请求都会走它 |
+| `NHENTAI_API_MIN_INTERVAL` | 自动 | 本地最小请求间隔（秒）；**不设置时自动**：配了 API Key → `1.5`（≈40 次/分钟），没配 → `3.2`（≈20 次/分钟）；显式设置则覆盖（`0` = 不节流） |
+| `NHENTAI_API_MAX_WAIT` | `20` | 429 时最多等多久；更大的 `retry-after` 直接回退 HTML |
+| `NHENTAI_API_DISABLE` | 空 | 设为 `1` 则完全不用 API，只走 HTML（旧行为/排查用） |
+
+> **什么时候仍然需要 Cookie**：只有回退到 HTML 时才需要（拉 `#info h1` 标题和 `.tag-container` 标签）。
+> 正常元数据抓取已不再需要 `cf_clearance`，也就不再受它「几分钟就过期」的影响。
 
 ## 403 排障：`Error retrieving gallery from nHentai! (Code: 403)` 是什么
 
@@ -92,15 +177,19 @@ LANraragi → 插件配置 → 上传 `nHentaiCustom.pm`（覆盖旧版即可，
 桩模块 + Mock DOM 全链路 19 项断言通过：末端 `[id]` 识别、①②③三级回退、oneshot URL、
 `source:` 标签、`{id}` 语法、Save archive title、失败报错等。
 
-### 3.1 新增：Cloudflare 诊断自检（无需安装 Mojo / LANraragi）
+### 自检脚本（无需安装 Mojo / LANraragi）
 
 ```bash
 perl lanraragi-plugin/test/cf-diagnostics-test.pl
 ```
 
-覆盖 18 项断言：挑战页识别（403 挑战页 / 普通 403 / 404 / `cf-mitigated` 头）、
-浏览器化请求头与 UA 一致性、`_nh_get` 重试（先挑战后成功）、连续挑战的报错清单、
-诊断信息（cookie 数量与 `cf_clearance` 有无）、404 不重试。
+覆盖 **47 项断言**：
+
+- **API 通道（3.2）**：JSON → tags 映射（tag 无前缀 / category·language·artist 带前缀 / source 标签）、`pretty` 标题、
+  429 按 `retry-after` 退避重试、404 不重试且明确报错、限流超阈值自动回退 HTML、v2 搜索选中最匹配候选、`{id}` 语法零请求、标题归一化、
+  **API Key 优先级（插件设置页 > 环境变量 > 不认证）与节流自动放宽（1.5s / 3.2s）**
+- **Cloudflare 诊断（3.1）**：挑战页识别（403 挑战页 / 普通 403 / 404 / `cf-mitigated` 头）、
+  浏览器化请求头与 UA 一致性、`_nh_get` 重试（先挑战后成功）、连续挑战的报错清单、诊断信息（cookie 数量与 `cf_clearance` 有无）、404 不重试
 
 
 

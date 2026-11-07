@@ -4,13 +4,18 @@ use strict;
 use warnings;
 use utf8;
 
-use URI::Escape;
+use URI::Escape ();
 use Mojo::UserAgent;
 use Mojo::DOM;
+use Mojo::JSON qw(decode_json);
 
 use LANraragi::Model::Plugins;
 use LANraragi::Utils::Logging qw(get_plugin_logger);
 use LANraragi::Utils::Redis qw(redis_decode);
+
+# 插件级状态：API Key（插件设置页 custom_args[1]）与上次 API 请求时间（本地节流用）
+our $NH_API_KEY  = '';
+our $NH_API_LAST = 0;
 
 sub plugin_info {
     return (
@@ -19,11 +24,14 @@ sub plugin_info {
         namespace   => "nhcustom",
         login_from  => "nhcustomcf",
         author      => "Difegue, Fixed by Paccu",
-        version     => "3.1 (CF Diagnostics)",
-        description => "Extracts tags from HTML DOM (no API, avoids 429 limits). Browser-like request headers + Cloudflare challenge detection with actionable diagnostics. Supports community tags. ID resolution: trailing [id] -> title search -> title without [id].",
+        version     => "3.2 (API-first + CF fallback)",
+        description => "Uses the official v2 API first (JSON, no cookie needed; 20/min anon, 45/min with API key) and falls back to HTML DOM scraping with browser-like headers and Cloudflare challenge detection. ID resolution: trailing [id] -> v2 search -> HTML search. Env: NHENTAI_BASE_URL, NHENTAI_API_KEY, NHENTAI_API_DISABLE, NHENTAI_API_MIN_INTERVAL.",
         icon =>
           "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABQAAAAUCAIAAAAC64paAAAACXBIWXMAAAsTAAALEwEAmpwYAAAA\nB3RJTUUH4wYCFA8s1yKFJwAAAB1pVFh0Q29tbWVudAAAAAAAQ3JlYXRlZCB3aXRoIEdJTVBkLmUH\nAAACL0lEQVQ4y6XTz0tUURQH8O+59773nLFcaGWTk4UUVCBFiJs27VxEQRH0AyRo4x8Q/Qtt2rhr\nU6soaCG0KYKSwIhMa9Ah+yEhZM/5oZMG88N59717T4sxM8eZCM/ycD6Xwznn0pWhG34mh/+PA8mk\n8jO5heziP0sFYwfgMDFQJg4IUjmquSFGG+OIlb1G9li5kykgTgvzSoUCaIYlo8/Igcjpj5wOkARp\n8AupP0uzJLijCY4zzoXOxdBLshAgABr8VOp7bpAXDEI7IBrhdksnjNr3WzI4LaIRV9fk2iAaYV/y\nA1dPiYjBAALgpQxnhV2XzTCAGWGeq7ACBvCdzKQyTH+voAm2hGlpcmQt2Bc2K+ymAhWPxTzPDQLt\nOKo1FiNBQaArq9WNRQwEgKl7XQ1duzSRSn/88vX0qf7DPQddx1nI5UfHxt+m0sLYPiP3shRAG8MD\nok1XEEXR/EI2ly94nrNYWG6Nx0/2Hp2b94dv34mlZge1e4hVCJ4jc6tl9ZP803n3/i4lpdyzq2N0\n7M3DkSeF5ZVYS8v1qxcGz5+5eey4nPDbmGdE9FpGeWErVNe2tTabX3r0+Nk3PwOgXFkdfz99+exA\nMtFZITEt9F23mpLG0hYTVQCKpfKPlZ/rqWKpYoAPcTmpginW76QBbb0OBaBaDdjaDbNlJmQE3/d0\nMYoaybU9126oPkrEhpr+U2wjtoVVGBowkslEsVSupRKdu0Mduq7q7kqExjSS3V2dvwDLavx0eczM\neAAAAABJRU5ErkJggg==",
-        parameters  => [ { type => "bool", desc => "Save archive title" } ],
+        parameters  => [
+            { type => "bool",   desc => "Save archive title" },
+            { type => "string", desc => "nhentai API Key (optional; raises v2 API limit from 20 to 45 req/min)" }
+        ],
         oneshot_arg => "nHentai Gallery URL"
     );
 }
@@ -33,12 +41,17 @@ sub get_tags {
     my $lrr_info = shift;
 
     my $savetitle = 0;
+    my $api_key   = '';
     if (ref($lrr_info) eq 'HASH') {
-        $savetitle = $lrr_info->{custom_args}->[0] || 0;
+        my $args = ref( $lrr_info->{custom_args} ) eq 'ARRAY' ? $lrr_info->{custom_args} : [];
+        $savetitle = $args->[0] || 0;
+        $api_key   = $args->[1] // '';
     } else {
         $savetitle = $_[3] || 0;
         $lrr_info = { archive_title => $lrr_info, existing_tags => $_[0] };
     }
+    $api_key =~ s/^\s+|\s+$//g;
+    $NH_API_KEY = $api_key;    # 插件参数优先；为空时 _nh_api_get 回落到环境变量 NHENTAI_API_KEY
 
     my $ua = $lrr_info->{user_agent} || Mojo::UserAgent->new;
     my $logger = get_plugin_logger();
@@ -118,6 +131,182 @@ sub _nh_base_url {
     $base =~ s/\s+//g;
     $base =~ s{/+$}{};
     return $base;
+}
+
+# ---------------------------------------------------------------------------
+# 官方 v2 API 通道（3.2 新增）
+#
+# 为什么要有它：HTML 页面（/g/{id}/、/search）在 Cloudflare 托管挑战后面，
+# cf_clearance 有效期只有几十分钟，动不动就 403；而 /api/v2/* 是**纯 JSON 接口，
+# 实测不带任何 cookie 也返回 200**（无 cf-mitigated / 无挑战页），因此元数据
+# 可以完全不依赖 cookie。
+#
+# 实测频率上限（2026-11，匿名 IP，连续打满实测）：
+#   GET /api/v2/galleries/{id}   20 次/分钟/IP   ← 第 21 次即 429（x-ratelimit-limit: 20, retry-after: 60）
+#   GET /api/v2/search           10 次/分钟/IP
+#   GET /api/v2/galleries        15 次/分钟/IP（列表，无搜索参数）
+#   GET /api/v2/galleries/{id}/related  12 次/分钟/IP
+#   GET /api/v2/galleries/popular        8 次/分钟/IP
+# 带 API Key（Authorization: Key xxx，见 nhentai 账号设置 → API Keys）：
+#   gallery 详情 45/分钟、搜索 20/分钟、列表 30/分钟
+# 429 响应头携带 retry-after，按它退避即可；请求过快只会 429，不会被 CF 挑战。
+#
+# 因此：默认「API 优先 + HTML 回退」，并用 NHENTAI_API_MIN_INTERVAL 做本地节流
+# （默认 3.2s ≈ 20/min），超过上限视为不可用自动回退 HTML。
+#   NHENTAI_API_KEY          可选，设置后 45 次/分钟（默认 3.2s 节流可放宽到 1.4s）
+#   NHENTAI_API_DISABLE=1    完全禁用 API，只用 HTML DOM（旧行为）
+#   NHENTAI_API_MIN_INTERVAL 本地最小请求间隔（秒，默认 3.2；0=不节流）
+#   NHENTAI_API_MAX_WAIT     429 时最多等待的秒数（默认 20；retry-after 更大则直接回退 HTML）
+# ---------------------------------------------------------------------------
+
+sub _nh_effective_key {
+    my $key = $NH_API_KEY;
+    $key = $ENV{NHENTAI_API_KEY} // '' unless length $key;
+    $key =~ s/^\s+|\s+$//g;
+    return $key;
+}
+
+# 本地最小请求间隔（秒）：
+#   - 显式设置 NHENTAI_API_MIN_INTERVAL 时以它为准（0 = 不节流）
+#   - 否则按是否带 API Key 自动决定：有 Key（45/min）→ 1.5s（≈40/min，留余量）；无 Key（20/min）→ 3.2s
+sub _nh_api_min_interval {
+    my $v = $ENV{NHENTAI_API_MIN_INTERVAL};
+    return $v + 0 if defined $v && $v =~ /^\d+(?:\.\d+)?$/;
+    return length( _nh_effective_key() ) ? 1.5 : 3.2;
+}
+
+sub _nh_sleep {
+    my ($secs) = @_;
+    return unless defined $secs && $secs > 0;
+    select( undef, undef, undef, $secs );
+}
+
+# 进程内节流：保证相邻两次 API 请求至少间隔 N 秒（LRR 批量任务时不会打爆 20/min）
+sub _nh_api_throttle {
+    my $gap = _nh_api_min_interval();
+    return if $gap <= 0;
+    my $wait = $NH_API_LAST + $gap - time();
+    _nh_sleep($wait) if $wait > 0;
+    $NH_API_LAST = time();
+}
+
+# 请求 v2 API，返回 ( $json_hashref, '' ) 或 ( undef, $err )
+# $err 取值：'not_found'（真 404）/ 'rate_limited(Ns)' / 'HTTP xxx' / '网络错误: ...'
+sub _nh_api_get {
+    my ( $ua, $path ) = @_;
+    my $logger = get_plugin_logger();
+    my $url    = _nh_base_url() . $path;
+    $ua = Mojo::UserAgent->new unless $ua;
+
+    my $key = _nh_effective_key();
+
+    my $max_wait = $ENV{NHENTAI_API_MAX_WAIT};
+    $max_wait = 20 unless defined $max_wait && $max_wait =~ /^\d+$/;
+
+    my $last = '';
+    for my $attempt ( 1 .. 3 ) {
+        _nh_api_throttle();
+
+        my $tx = eval { $ua->build_tx( GET => $url ) };
+        if ( !$tx ) {
+            $last = "build_tx 失败: $@";
+            last;
+        }
+        my $h = $tx->req->headers;
+        $h->header( 'Accept'  => 'application/json' );
+        $h->header( 'Referer' => _nh_base_url() . '/' );
+        $h->header( 'Authorization' => "Key $key" ) if length $key;
+
+        my $res = eval { $ua->start($tx)->result };
+        if ( !$res ) {
+            $last = '网络错误: ' . ( $@ || 'unknown' );
+            next;
+        }
+
+        my $code = $res->code // 0;
+        my $body = $res->body // '';
+
+        return ( undef, 'not_found' ) if $code == 404;
+
+        if ( $code == 429 ) {
+            my $ra = $res->headers->header('retry-after') // '';
+            $ra =~ s/\D//g;
+            $ra = 60 unless length $ra;
+            if ( $ra > $max_wait ) {
+                $logger->warn("v2 API 限流：需等待 ${ra}s（超过 NHENTAI_API_MAX_WAIT=$max_wait），直接回退 HTML");
+                return ( undef, "rate_limited(${ra}s)" );
+            }
+            $logger->warn("v2 API 触发限流（429），${ra}s 后重试（第 $attempt/3 次）");
+            _nh_sleep($ra);
+            $last = 'rate_limited';
+            next;
+        }
+
+        if ( $code >= 400 ) {
+            $last = 'HTTP ' . $code;
+            $last .= ' Cloudflare 挑战页' if _is_challenge_page( $res, $body );
+            last;
+        }
+
+        my $json = eval { decode_json($body) };
+        if ( !$json ) {
+            $last = 'JSON 解析失败（' . length($body) . " 字节）";
+            last;
+        }
+        return ( $json, '' );
+    }
+
+    return ( undef, $last || 'unknown error' );
+}
+
+# v2 gallery JSON → LRR 的 %hashdata（tags 字符串 + 可选 title）
+# 命名空间规则与 HTML 路径保持一致：tag 无前缀，其余 language/category/character/parody/artist/group 带前缀
+sub _api_hashdata {
+    my ( $json, $gid, $savetitle ) = @_;
+    my %hashdata = ( tags => '' );
+    return %hashdata unless ref($json) eq 'HASH';
+
+    my @tags = ();
+    for my $t ( @{ $json->{tags} || [] } ) {
+        next unless ref($t) eq 'HASH';
+        my $type = $t->{type} // '';
+        my $name = $t->{name} // '';
+        $name =~ s/^\s+|\s+$//g;
+        next unless length $name;
+        if ( $type eq '' || $type eq 'tag' ) {
+            push( @tags, $name );
+        } elsif ( $type =~ /^(language|category|character|parody|artist|group)$/ ) {
+            push( @tags, "$type:$name" );
+        }
+    }
+
+    push( @tags, "source:nhentai.net/g/$gid" ) if (@tags);
+    $hashdata{tags} = join( ', ', @tags );
+
+    if ($savetitle) {
+        my $t      = $json->{title};
+        my $pretty = '';
+        if ( ref($t) eq 'HASH' ) {
+            $pretty = $t->{pretty} // $t->{english} // $t->{japanese} // '';
+        } elsif ( !ref($t) ) {
+            $pretty = $t // '';
+        }
+        $pretty =~ s/^\s+|\s+$//g;
+        $hashdata{title} = $pretty if length $pretty;
+    }
+
+    return %hashdata;
+}
+
+# 标题归一化：只保留字母数字（去大小写/标点/空白差异），用于在搜索结果的候选里挑最像的那个
+sub _norm_title {
+    my ($s) = @_;
+    $s = '' unless defined $s;
+    $s =~ s/^\s+|\s+$//g;
+    $s =~ s/[\r\n\t]+/ /g;
+    $s = lc $s;
+    $s =~ s/[^\p{L}\p{N}]+//g;
+    return $s;
 }
 
 # 取 $ua 当前的 User-Agent（CF 的 cf_clearance 与 UA 强绑定，必须原样透传）
@@ -276,7 +465,7 @@ sub get_gallery_dom_by_title {
     my $logger = get_plugin_logger();
 
     $title =~ s/-|'/ /g;
-    my $query = uri_escape_utf8($title);
+    my $query = URI::Escape::uri_escape_utf8($title);
     $query =~ s/%20/+/g;
 
     my $URL = _nh_base_url() . "/search?q=" . $query;
@@ -292,9 +481,36 @@ sub get_gallery_dom_by_title {
 
 sub get_gallery_id_from_title {
     my ( $title, $ua ) = @_;
+    my $logger = get_plugin_logger();
 
     if ( $title =~ /\{(\d*)\}.*$/gm ) { return $1; }
 
+    # (I) v2 搜索优先：10 次/分钟（匿名）/ 20 次（API Key），不做 CF 挑战、不需要 cookie
+    if ( !$ENV{NHENTAI_API_DISABLE} ) {
+        my $q = $title;
+        $q =~ s/-|'/ /g;
+        $q =~ s/^\s+|\s+$//g;
+        if ( length $q ) {
+            my ( $json, $err ) =
+              _nh_api_get( $ua, '/api/v2/search?query=' . URI::Escape::uri_escape_utf8($q) . '&page=1' );
+            if ($json) {
+                my @rs = grep { ref($_) eq 'HASH' && $_->{id} } @{ $json->{result} || [] };
+                if (@rs) {
+                    # 优先取标题归一化后完全一致的候选，其次取相关度第一条
+                    my $want = _norm_title($q);
+                    my ($best) = grep { _norm_title( $_->{english_title} // '' ) eq $want } @rs;
+                    $best ||= $rs[0];
+                    $logger->info( "v2 搜索命中 gallery id=" . $best->{id} );
+                    return $best->{id};
+                }
+                $logger->info('v2 搜索无结果，回退 HTML 搜索');
+            } elsif ( $err ne 'not_found' ) {
+                $logger->warn("v2 搜索不可用（$err），回退 HTML 搜索");
+            }
+        }
+    }
+
+    # (II) HTML 搜索回退
     my $dom = get_gallery_dom_by_title( $title, $ua );
     if ($dom && $dom->at('.cover')) {
         my $gURL = $dom->at('.cover')->attr('href');
@@ -330,7 +546,33 @@ sub get_tags_from_NH {
     my %hashdata = ( tags => "" );
     my $logger = get_plugin_logger();
 
-    $logger->info("Fetching HTML DOM to extract tags (V2 API bypassed to avoid 429 limits)...");
+    # ---- (A) 官方 v2 API 优先：无 Cloudflare 挑战、不需要 cookie ----
+    # 限流：gallery 详情 20 次/分钟（匿名）/ 45 次（API Key）；本地节流 + 429 退避见 _nh_api_get
+    if ( !$ENV{NHENTAI_API_DISABLE} ) {
+        my ( $json, $err ) = _nh_api_get( $ua, "/api/v2/galleries/$gID" );
+        if ($json) {
+            my %api = _api_hashdata( $json, $gID, $savetitle );
+            if ( $api{tags} ) {
+                $logger->info(
+                    "v2 API 命中：gallery $gID（tags="
+                      . scalar( @{ $json->{tags} || [] } )
+                      . ', media_id='
+                      . ( $json->{media_id} // '?' )
+                      . ', pages='
+                      . ( $json->{num_pages} // '?' ) . '）'
+                );
+                return %api;
+            }
+            $logger->warn("v2 API 返回 200 但没有标签（gallery $gID），回退 HTML DOM");
+        } elsif ( $err eq 'not_found' ) {
+            die "Error retrieving gallery from nHentai! (Code: 404) — 本子 $gID 不存在或已删除\n";
+        } else {
+            $logger->warn("v2 API 不可用（$err），回退 HTML DOM");
+        }
+    }
+
+    # ---- (B) HTML DOM 回退 ----
+    $logger->info("Fetching HTML DOM to extract tags (API fallback)...");
     my $dom = get_html_from_NH( $gID, $ua );
 
     if ($dom) {
