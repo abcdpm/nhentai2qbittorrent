@@ -13,7 +13,7 @@ const { Config } = require('../src/config');
 const { Logger } = require('../src/logger');
 const { KeyStore } = require('../src/keys');
 const { TaskStore } = require('../src/store');
-const { Downloader, magicBlob, sniffMagic } = require('../src/downloader');
+const { Downloader, magicBlob, sniffMagic, lrrUploadIntervalMs, withLrrThrottle } = require('../src/downloader');
 const { QueueManager } = require('../src/queue');
 const { createHandler } = require('../src/api');
 const { parseGalleryHtml, parseGalleryApi, fetchGalleryMeta } = require('../src/nhentai');
@@ -75,6 +75,7 @@ function createMockSite(galleries) {
             req.on('end', () => {
                 if (parts[2] === 'upload') {
                     state.lrrUploads.push({
+                        at: Date.now(),
                         auth: req.headers.authorization || '',
                         method: req.method,
                         size: bodyBuf.length,
@@ -168,6 +169,7 @@ function makeEnv(mock, tmpName) {
     config.data.downloadDir = path.join(tmp, 'dl');
     config.data.requestIntervalMs = 0;
     config.data.galleryIntervalMs = 0;
+    config.data.lrrUploadIntervalMs = 0;   // 测试默认不等待上传间隔（专项用例会显式设置）
     config.data.pageConcurrency = 2;
     config.data.timeoutMs = 1200;
     config.data.maxAttempts = 3;
@@ -1396,6 +1398,60 @@ test('OIDC 跳转地址：子路径部署由 oidcRedirectUri 推导应用基址�
             '未配置 OIDC 的跳转同样应带应用基址');
     } finally {
         server.close();
+        await env.queue.stop();
+        mock.close();
+    }
+});
+
+test('LRR 上传间隔配置：默认 3000ms、允许 0 不限速、非法值回落', () => {
+    const cfg = (v) => ({ get: (k) => (k === 'lrrUploadIntervalMs' ? v : undefined) });
+    assert.strictEqual(lrrUploadIntervalMs(cfg(undefined)), 3000, '未配置时默认 3000ms');
+    assert.strictEqual(lrrUploadIntervalMs(cfg(0)), 0, '0 = 不限速');
+    assert.strictEqual(lrrUploadIntervalMs(cfg(-5)), 3000, '负值回落 3000');
+    assert.strictEqual(lrrUploadIntervalMs(cfg('abc')), 3000, '非法值回落 3000');
+    assert.strictEqual(lrrUploadIntervalMs(cfg(1500)), 1500, '合法值原样使用');
+});
+
+test('LRR 上传闸门全局串行：并发调用也不会同时上传', async () => {
+    const cfg = { get: () => 0 };
+    let running = 0;
+    let maxRunning = 0;
+    await Promise.all([1, 2, 3].map(() => withLrrThrottle(cfg, null, 'test', async () => {
+        running++;
+        maxRunning = Math.max(maxRunning, running);
+        await new Promise(r => setTimeout(r, 20));
+        running--;
+    })));
+    assert.strictEqual(maxRunning, 1, '上传必须串行执行（同一时刻只有 1 个）');
+});
+
+test('LRR 连续上传按 lrrUploadIntervalMs 限速（批量任务不再快速连传）', async () => {
+    const mock = await createMockSite(GALLERY_1);
+    const env = makeEnv(mock);
+    env.config.data.zipAfterVerify = true;
+    env.config.data.lrrUrl = `http://127.0.0.1:${mock.port}`;
+    env.config.data.lrrUploadIntervalMs = 300;      // 测试用小间隔（默认 3000）
+    try {
+        const { added } = env.queue.enqueue([
+            {
+                gid: '123001', title: '[作者A] 测试本子标题',
+                meta: { mediaId: '900001', numPages: 3, extMap: ['jpg', 'png', 'webp'], coverHost: null }
+            },
+            {
+                gid: '123002', title: '[作者B] 旋转与重试',
+                meta: { mediaId: '900002', numPages: 2, extMap: ['jpg', 'jpg'], coverHost: null }
+            }
+        ]);
+        env.queue.start();
+        await waitFor(() => {
+            const ts = added.map(t => env.store.get(t.id));
+            return ts.every(t => t && ['completed', 'completed_with_errors', 'failed'].includes(t.status));
+        }, 30000, '两个任务完成');
+
+        assert.strictEqual(mock.state.lrrUploads.length, 2, '两本都应上传到 LANraragi');
+        const gap = mock.state.lrrUploads[1].at - mock.state.lrrUploads[0].at;
+        assert.ok(gap >= 250, `两次上传应至少间隔约 300ms（实际 ${gap}ms）`);
+    } finally {
         await env.queue.stop();
         mock.close();
     }

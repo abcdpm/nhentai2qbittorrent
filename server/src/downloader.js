@@ -110,13 +110,61 @@ class WebpConverter {
     }
 }
 
+/**************************************************************************
+ * LANraragi 上传节流：全局串行 + 最小间隔
+ *
+ * 批量下载时多个任务可能在几秒内先后压缩完成，若一起上传：
+ *   1) LRR 同时处理多个大 zip（解压 + 建索引 + 打标签）容易超时/500；
+ *   2) 紧跟其后的 LRR 元数据插件任务会和自己抢同一出口 IP 的限流配额。
+ * 因此所有上传都走这条串行闸门：
+ *   - 同一时刻只有一个上传在进行；
+ *   - 相邻两次上传的开始时间至少间隔 lrrUploadIntervalMs（以上一次“结束”时间为基准，更保守）。
+ **************************************************************************/
+const lrrGate = { chain: Promise.resolve(), lastFinishedAt: 0 };
+
+/** 读取上传间隔（毫秒）：非法/负数回落到 3000；0 = 不限速 */
+function lrrUploadIntervalMs(cfg) {
+    const v = Number(cfg.get('lrrUploadIntervalMs'));
+    if (!Number.isFinite(v) || v < 0) return 3000;
+    return v;
+}
+
+/** 串行 + 最小间隔执行一次 LRR 操作（fn 的异常原样抛给调用方） */
+function withLrrThrottle(cfg, logger, label, fn) {
+    const gap = lrrUploadIntervalMs(cfg);
+    const run = async () => {
+        if (gap > 0 && lrrGate.lastFinishedAt) {
+            const wait = lrrGate.lastFinishedAt + gap - Date.now();
+            if (wait > 0) {
+                if (logger) logger.info(`${label} 节流：等待 ${(Math.ceil(wait / 100) / 10)}s（上传间隔 ${gap}ms）`);
+                await sleep(wait);
+            }
+        }
+        try {
+            return await fn();
+        } finally {
+            lrrGate.lastFinishedAt = Date.now();
+        }
+    };
+    // 挂到链尾：失败也不能中断后续上传的排队
+    const p = lrrGate.chain.then(run, run);
+    lrrGate.chain = p.then(() => {}, () => {});
+    return p;
+}
+
 /**
  * 上传 zip 到 LANraragi（PUT /api/archives/upload）。
  * 附带 title / tags(source:…) / SHA1 校验；失败抛错，由调用方决定是否影响任务。
+ * 注意：实际 HTTP 请求经 withLrrThrottle 串行 + 限速，批量场景不会连传打爆 LRR。
  */
 async function uploadToLanraragi(zipPath, task, cfg, logger) {
     const base = String(cfg.get('lrrUrl') || '').trim().replace(/\/+$/, '');
     if (!base) return null;
+    return withLrrThrottle(cfg, logger, `[gid:${task.gid}] LANraragi 上传`, () =>
+        doUploadToLanraragi(base, zipPath, task, cfg, logger));
+}
+
+async function doUploadToLanraragi(base, zipPath, task, cfg, logger) {
     const log = (m) => { if (logger) logger.info(`[gid:${task.gid}] ${m}`); };
 
     const buf = fs.readFileSync(zipPath);
@@ -529,6 +577,6 @@ class Downloader {
     }
 }
 
-module.exports = { Downloader, WebpConverter, sniffMagic, extOfFile, magicBlob, MAGIC };
+module.exports = { Downloader, WebpConverter, sniffMagic, extOfFile, magicBlob, MAGIC, uploadToLanraragi, withLrrThrottle, lrrUploadIntervalMs };
 
 

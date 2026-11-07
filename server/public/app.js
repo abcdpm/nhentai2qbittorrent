@@ -330,6 +330,7 @@
     const SETTINGS_FIELDS = ['downloadDir', 'requestIntervalMs', 'galleryIntervalMs', 'pageConcurrency',
         'timeoutMs', 'maxAttempts', 'retryDelayMs', 'repairRounds', 'webpQuality',
         'metaUrlTemplate', 'apiUrlTemplate', 'nhCookie', 'userAgent', 'lrrUrl', 'lrrApiKey', 'lrrCategory',
+        'lrrUploadIntervalMs',
         'oidcIssuer', 'oidcClientId', 'oidcClientSecret', 'oidcScopes', 'oidcRedirectUri', 'sessionTtlDays'];
 
     async function loadSettings() {
@@ -361,7 +362,10 @@
         const patch = {};
         for (const f of SETTINGS_FIELDS) {
             const el = $('#set-' + f);
-            if (el) patch[f] = el.type === 'number' ? Number(el.value) : el.value;
+            if (!el) continue;
+            // 数字项留空 = 不改（保留服务端当前值），避免误清空变成 0
+            if (el.type === 'number' && String(el.value).trim() === '') continue;
+            patch[f] = el.type === 'number' ? Number(el.value) : el.value;
         }
         patch.convertToWebp = $('#set-convertToWebp').checked;
         patch.keepOriginal = $('#set-keepOriginal').checked;

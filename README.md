@@ -126,6 +126,8 @@ GET/PUT /api/settings                 GET/POST /api/keys     DELETE /api/keys/:i
 
 ### Web 控制台（镜像 5.0.5）
 - **LANraragi 插件升级到 3.2：元数据改走官方 v2 API，不再依赖 Cookie**——实测 `GET /api/v2/galleries/{id}` 不带 `cf_clearance` 也返回 200（JSON 内含 title/tags/media_id/num_pages），而 HTML 页面 `/g/{id}/`、`/search` 已被 Cloudflare 托管挑战接管（无效 cookie 直接 403「Just a moment...」）；新链路 `[id] → v2 详情 →（限流/失败）→ v2 搜索 → HTML DOM（3.1 的 CF 诊断）`。**实测频率上限**：单本详情 **20 次/分钟/IP**（第 21 次即 429，`x-ratelimit-limit: 20`、`retry-after: 60`；带 API Key 45 次），搜索 10 次/分钟（Key 20 次）；插件内置 Redis 全局节流（跨 worker 共享配额；没配 Key 3.2s / 配了 Key 自动放宽到 1.5s）+ 429 按 `retry-after` 等待（默认最多 90s，熬过 nhentai 的 60s 窗口；等不起且无 `cf_clearance` 时直接报可操作错误而不白跑 HTML），并支持 `NHENTAI_API_KEY`/`NHENTAI_API_MIN_INTERVAL`/`NHENTAI_API_DISABLE`/`NHENTAI_BASE_URL`
+- **LANraragi 上传加上节流（避免批量任务快速连传把 LRR 打爆）**——所有上传改为走一条**全局串行闸门 + 最小间隔**：同一时刻只上传一个 zip，且相邻两次上传的开始时间距上一次**结束**至少 `lrrUploadIntervalMs`（设置 → LANraragi →「上传间隔（毫秒）」，默认 **3000ms**，`0`=不限速；也可用环境变量 `NH_LRR_UPLOAD_INTERVAL_MS`）；被节流时日志打印「节流：等待 Ns（上传间隔 3000ms）」；顺带修复「保存设置」时数字项**留空会被存成 0** 的问题（现在留空=保留原值）
+
 - **修复：子路径部署下 OIDC 重定向丢前缀 / 被 nginx proxy_redirect 误伤**——回调成功/失败的跳转原先为根相对地址 `Location: /`（子路径部署会跳出 `/nhentai` 落到 404），常见"用 proxy_redirect 打补丁"的做法又会把跳转 IdP 的 `https://host/authentik/...` 误改成 `https://host/nhentai/authentik/...`，导致**SSO 登录后退出再登录转一圈回到登录页**；现服务端跳转一律由 `oidcRedirectUri` 推导应用基址、自带正确前缀（`https://host/nhentai/`），**升级后请删除 nginx 里为修此问题添加的 `proxy_redirect` 规则**
 - **登录页不再暴露备用登录入口**：`?login=local` 提示从登录页与设置页移除（页面不展示，仅管理员通过文档知晓）；**打开首页自动跳转 SSO 登录**——已登录用户直接进控制台不受影响；主动退出后显示登录门与 SSO 按钮但不自动跳回（避免静默 SSO 立刻登回）；OIDC 失败自动落回备用登录入口，不会循环跳转
 - **修复：OIDC `iss` 校验兼容尾斜杠**——部分 IdP（如 authentik）的 `id_token.iss` 带尾斜杠而配置的 Issuer 不带，触发 "id_token iss 不匹配"；现 `iss` 比对忽略尾斜杠（Issuer 配置保持不带尾斜杠、端点拼接照旧），不同域仍拒绝
